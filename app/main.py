@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.v1 import api_router
 # 从 .database 模块导入 create_tables 函数，用于在应用启动时创建数据库表
 from .database import create_tables
+# 从 .core.logging_config 模块导入 configure_logging 函数，用于配置日志系统
+from .core.logging_config import configure_logging
 
 # 创建 FastAPI 应用实例
 # title 参数为应用设置一个标题，这个标题会在 OpenAPI 文档 (例如 Swagger UI) 中显示
@@ -17,11 +19,19 @@ app = FastAPI(title="WorldQuant Brain Alpha Evolution System")
 # 这对于执行初始化任务非常有用，例如创建数据库表、加载配置等。
 @app.on_event("startup")
 async def startup_event():
+    # 调用 configure_logging() 函数，配置应用范围的日志记录器。
+    # 建议在其他启动任务之前配置日志，以便后续任务可以立即使用配置好的日志系统。
+    configure_logging()
+
     # 调用 create_tables() 函数，创建在 app.models 中定义的数据库表。
     # 如果表已存在，此操作通常不会产生影响。
     create_tables()
-    # 可以在此处添加其他启动时需要执行的逻辑，例如初始化日志配置 (将在后续任务中添加)
-    # print("数据库表创建（如果不存在）完成。") # 临时打印，用于确认启动事件执行
+
+    # 获取根日志记录器，并记录一条信息表明应用已启动和服务配置完成。
+    # 这是为了验证日志系统是否按预期工作。
+    import logging
+    logger = logging.getLogger(__name__) # 使用 __name__ 获取当前模块的日志记录器
+    logger.info("FastAPI 应用启动完成，日志系统和数据库表已配置。")
 
 # 配置 CORS 中间件
 # origins 列表定义了允许访问本 API 的来源域

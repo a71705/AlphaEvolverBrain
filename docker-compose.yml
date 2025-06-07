@@ -17,9 +17,10 @@ services:
     environment:
       # REDIS_URL: 指定 Redis 服务的连接地址。
       REDIS_URL: "redis://redis:6379/0"
-      # DATABASE_URL: 指定 SQLite 数据库文件的路径。
-      # '/app/data/' 目录将通过命名卷 'alpha_db_data' 进行持久化。
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
+      # LOG_LEVEL: 控制应用日志输出的级别 (例如 DEBUG, INFO, WARNING, ERROR)。
+      # 这个值会被 app/core/logging_config.py 读取。
+      LOG_LEVEL: "INFO"
     # 卷挂载：将命名卷 'alpha_db_data' 挂载到容器的 '/app/data' 目录。
     # 这确保了 SQLite 数据库文件在容器重启或删除后依然存在。
     volumes:
@@ -52,11 +53,12 @@ services:
     # 命令：覆盖 Dockerfile 中的 CMD 指令。
     # ["tail", "-f", "/dev/null"] 是一个占位命令，使容器保持运行状态。
     # 在 DEV-013 任务中，这个命令会被替换为实际启动 RQ worker 的命令。
-    command: ["tail", "-f", "/dev/null"] # 占位命令，稍后会更新为 RQ worker 命令
+    command: ["tail", "-f", "/dev/null"]
     environment:
       REDIS_URL: "redis://redis:6379/0"
-      # DATABASE_URL: Worker 服务也可能需要访问数据库。
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
+      # LOG_LEVEL: 控制 Worker 日志输出的级别。
+      LOG_LEVEL: "INFO"
     # 卷挂载：Worker 服务也需要访问数据库文件。
     volumes:
       - alpha_db_data:/app/data
