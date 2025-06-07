@@ -16,26 +16,20 @@ services:
     # 这些变量可以在应用代码中通过 os.environ.get() 读取。
     environment:
       # REDIS_URL: 指定 Redis 服务的连接地址。
-      # 'redis' 是下面定义的 Redis 服务的名称，Docker Compose 会处理网络解析。
-      # '6379' 是 Redis 的默认端口。
-      # '/0' 是 Redis 的默认数据库编号。
       REDIS_URL: "redis://redis:6379/0"
-      # 后续任务中可能会添加其他环境变量，例如数据库连接、API 密钥等。
+      # DATABASE_URL: 指定 SQLite 数据库文件的路径。
+      # '/app/data/' 目录将通过命名卷 'alpha_db_data' 进行持久化。
+      DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
+    # 卷挂载：将命名卷 'alpha_db_data' 挂载到容器的 '/app/data' 目录。
+    # 这确保了 SQLite 数据库文件在容器重启或删除后依然存在。
+    volumes:
+      - alpha_db_data:/app/data
+      # - ./app:/app/app # 开发时代码实时更新，根据需要启用
     # 依赖关系：定义服务启动的依赖顺序。
-    # web 服务将在 redis 服务启动之后再启动。
     depends_on:
       - redis
     # 重启策略：定义容器在退出时的重启行为。
-    # 'unless-stopped' 表示除非手动停止，否则容器总是在退出后重启。
     restart: unless-stopped
-    # 卷挂载 (可选，如果需要实时代码更新且 Dockerfile 中 CMD 使用 --reload):
-    # 将本地的 ./app 目录挂载到容器内的 /app/app 目录。
-    # 这样在本地修改代码后，Uvicorn 的 --reload 可以检测到变化并自动重启。
-    # 注意：如果 Dockerfile 中的 COPY . . 已经复制了整个应用，
-    # 并且 CMD 使用了 --reload，这个卷挂载主要用于开发时的即时反馈。
-    # 对于生产环境，通常不挂载应用代码卷，而是构建包含最新代码的镜像。
-    # volumes:
-    #   - ./app:/app/app # 根据实际项目结构调整
 
   # Redis 服务：运行 Redis 数据库的容器。
   redis:
@@ -59,20 +53,22 @@ services:
     # ["tail", "-f", "/dev/null"] 是一个占位命令，使容器保持运行状态。
     # 在 DEV-013 任务中，这个命令会被替换为实际启动 RQ worker 的命令。
     command: ["tail", "-f", "/dev/null"] # 占位命令，稍后会更新为 RQ worker 命令
-    # 环境变量：与 web 服务类似，worker 也需要连接到 Redis。
     environment:
       REDIS_URL: "redis://redis:6379/0"
-      # 后续可能会添加其他 worker 特定的环境变量。
-    # 依赖关系：worker 服务依赖于 redis 和 web 服务。
-    # web 服务可能包含数据库迁移等初始化操作，worker 可能需要等待其完成。
+      # DATABASE_URL: Worker 服务也可能需要访问数据库。
+      DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
+    # 卷挂载：Worker 服务也需要访问数据库文件。
+    volumes:
+      - alpha_db_data:/app/data
+      # - ./app:/app/app # 开发时代码实时更新，根据需要启用
     depends_on:
       - redis
       - web
-    # 重启策略：与 web 服务类似。
     restart: unless-stopped
 
 # 定义命名卷 (named volumes)，用于数据持久化。
 volumes:
   # redis_data 卷：用于 Redis 服务持久化数据。
-  # Docker 会管理这个卷的生命周期。
   redis_data:
+  # alpha_db_data 卷：用于 SQLite 数据库文件持久化。
+  alpha_db_data:

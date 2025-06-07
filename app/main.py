@@ -5,10 +5,23 @@ from fastapi.middleware.cors import CORSMiddleware
 # 从 .api.v1 模块导入 api_router，这里假设 api_router 会在 v1 模块中定义
 # 这个路由器将包含 /api/v1 前缀下的所有 API 路由
 from .api.v1 import api_router
+# 从 .database 模块导入 create_tables 函数，用于在应用启动时创建数据库表
+from .database import create_tables
 
 # 创建 FastAPI 应用实例
 # title 参数为应用设置一个标题，这个标题会在 OpenAPI 文档 (例如 Swagger UI) 中显示
 app = FastAPI(title="WorldQuant Brain Alpha Evolution System")
+
+# FastAPI 应用启动事件处理器
+# 使用 @app.on_event("startup") 装饰器注册一个在应用启动时执行的函数。
+# 这对于执行初始化任务非常有用，例如创建数据库表、加载配置等。
+@app.on_event("startup")
+async def startup_event():
+    # 调用 create_tables() 函数，创建在 app.models 中定义的数据库表。
+    # 如果表已存在，此操作通常不会产生影响。
+    create_tables()
+    # 可以在此处添加其他启动时需要执行的逻辑，例如初始化日志配置 (将在后续任务中添加)
+    # print("数据库表创建（如果不存在）完成。") # 临时打印，用于确认启动事件执行
 
 # 配置 CORS 中间件
 # origins 列表定义了允许访问本 API 的来源域
