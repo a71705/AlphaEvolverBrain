@@ -18,9 +18,12 @@ services:
       # REDIS_URL: 指定 Redis 服务的连接地址。
       REDIS_URL: "redis://redis:6379/0"
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      # LOG_LEVEL: 控制应用日志输出的级别 (例如 DEBUG, INFO, WARNING, ERROR)。
-      # 这个值会被 app/core/logging_config.py 读取。
       LOG_LEVEL: "INFO"
+      # WorldQuant Brain API 凭据 (占位符)
+      # 重要：这些是占位符值，请勿在生产中直接使用或提交到版本控制。
+      # 生产环境中应通过 Docker Secrets, HashiCorp Vault, GCP Secret Manager 等安全方式注入。
+      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 您的 WorldQuant Brain 邮箱
+      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 您的 WorldQuant Brain 密码
     # 卷挂载：将命名卷 'alpha_db_data' 挂载到容器的 '/app/data' 目录。
     # 这确保了 SQLite 数据库文件在容器重启或删除后依然存在。
     volumes:
@@ -57,8 +60,10 @@ services:
     environment:
       REDIS_URL: "redis://redis:6379/0"
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      # LOG_LEVEL: 控制 Worker 日志输出的级别。
       LOG_LEVEL: "INFO"
+      # WorldQuant Brain API 凭据 (占位符) - Worker 可能也需要访问 API
+      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com"
+      BRAIN_CREDENTIAL_PASSWORD: "your_password"
     # 卷挂载：Worker 服务也需要访问数据库文件。
     volumes:
       - alpha_db_data:/app/data
