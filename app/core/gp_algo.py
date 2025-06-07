@@ -5,6 +5,7 @@ import random
 # List[X] 表示一个列表，其所有元素都是 X 类型。
 from typing import Optional, List
 import logging # 导入 logging 模块
+import pandas as pd # 导入 pandas 用于数据处理，特别是 fitness_fun 中的 DataFrame 操作
 
 logger = logging.getLogger(__name__) # 获取 logger 实例，以便使用 logger.warning
 
@@ -109,6 +110,201 @@ unary_ops: List[str] = [
     "pasteurize",  # Pasteurize 处理 (一种去极值或平滑方法)
     "log"          # 自然对数: op(A) -> ln(A) (需注意定义域，A > 0)
 ]
+
+def _recursive_tree_to_alpha(node: Optional[Node]) -> str:
+    """
+    递归辅助函数，将以 'node' 为根的表达式树转换为 Alpha 表达式字符串。
+
+    参数:
+        node (Optional[Node]): 当前要转换的树节点。如果为 None，则表示空子树。
+
+    返回:
+        str: 该节点及其子树对应的 Alpha 表达式字符串。
+             如果节点为 None 或无效，则返回空字符串。
+    """
+    if node is None:
+        logger.warning("_recursive_tree_to_alpha 接收到 None 节点，返回空字符串。")
+        return "" # 处理空子树的情况
+
+    node_value_str = str(node.value) # 确保节点值是字符串
+
+    # 检查节点值是否是终端值或时间序列操作的参数值 (通常是数字字符串)
+    # 这些类型的节点是递归的终点，直接返回其值。
+    if node_value_str in terminal_values or node_value_str in ts_ops_values:
+        return node_value_str
+
+    # 检查节点值是否是一元操作符
+    elif node_value_str in unary_ops:
+        if node.left:
+            # 递归转换左子树，并格式化为 "op(left_child_expr)"
+            left_expr = _recursive_tree_to_alpha(node.left)
+            return f"{node_value_str}({left_expr})"
+        else:
+            # 一元操作符必须有左子节点
+            logger.error(f"一元操作符 '{node_value_str}' 缺少左子节点。")
+            return "" # 或根据错误处理策略抛出异常
+
+    # 检查节点值是否是二元操作符
+    elif node_value_str in binary_ops:
+        if node.left and node.right:
+            # 递归转换左右子树，并格式化为 "op(left_child_expr,right_child_expr)"
+            left_expr = _recursive_tree_to_alpha(node.left)
+            right_expr = _recursive_tree_to_alpha(node.right)
+            return f"{node_value_str}({left_expr},{right_expr})"
+        else:
+            # 二元操作符必须有左右两个子节点
+            logger.error(f"二元操作符 '{node_value_str}' 缺少一个或两个子节点。")
+            return ""
+
+    # 检查节点值是否是时间序列操作符
+    # 时间序列操作符在结构上通常类似于二元操作符 (例如 ts_rank(data, period))
+    elif node_value_str in ts_ops:
+        if node.left and node.right:
+            # 递归转换左右子树 (通常左边是数据字段树，右边是周期值节点)
+            left_expr = _recursive_tree_to_alpha(node.left)
+            right_expr = _recursive_tree_to_alpha(node.right)
+            return f"{node_value_str}({left_expr},{right_expr})"
+        else:
+            # 时间序列操作符通常需要两个参数
+            logger.error(f"时间序列操作符 '{node_value_str}' 缺少一个或两个子节点。")
+            return ""
+
+    else:
+        # 如果节点值不属于任何已知的操作符或终端类型
+        logger.error(f"未知的节点类型或值: '{node_value_str}'。无法转换为表达式。")
+        return "" # 或者抛出异常，表示树结构不符合预期
+
+def tree_to_alpha(tree: Node) -> str:
+    """
+    将给定的表达式树转换为 Alpha 表达式字符串。
+    这是调用递归辅助函数 _recursive_tree_to_alpha 的公共接口。
+
+    参数:
+        tree (Node): 要转换的表达式树的根节点。
+
+    返回:
+        str: 转换后的 Alpha 表达式字符串。
+             如果输入的树为空或无效，可能返回空字符串（取决于 _recursive_tree_to_alpha 的行为）。
+    """
+    if not isinstance(tree, Node):
+        logger.error(f"tree_to_alpha 接收到的输入不是有效的 Node 对象: {type(tree)}。将返回空字符串。")
+        return ""
+
+    logger.debug(f"开始将树转换为 Alpha 表达式: {tree!r}") # 记录整个树的表示形式可能很长, 使用!r
+
+    expression_str = _recursive_tree_to_alpha(tree)
+
+    if not expression_str:
+        logger.warning(f"树转换为 Alpha 表达式的结果为空字符串。可能原因：树为空、结构无效或包含未知节点。输入树: {tree!r}")
+        # !r 用于获取 repr 表示，避免过长的日志
+
+    logger.info(f"树成功转换为 Alpha 表达式: '{expression_str}'") # 记录生成的表达式
+    return expression_str
+
+# ... (后续将定义 fitness_fun 等) ...
+# 确保 pandas 已导入:
+# import pandas as pd # 应已在文件顶部
+
+def fitness_fun(Data: pd.DataFrame, n: int) -> List[str]: # List 来自 typing
+    """
+    计算适应度函数（占位符/示意性实现）。
+
+    注意：此函数的当前实现是高度示意性的，基于对常规适应度函数功能的猜测，
+    并试图匹配任务描述中给出的非常规返回类型 (List[str])。
+    实际的适应度计算逻辑需要根据 'code.py' 中的原始实现或具体项目需求来确定和替换。
+
+    参数:
+        Data (pd.DataFrame): 输入的 Pandas DataFrame。
+                             假设此 DataFrame 包含评估 Alpha 表现所需的数据列，
+                             例如 'returns' (收益率), 'sharpe_ratio' (夏普比率) 等。
+                             列名和数据内容是假设的。
+        n (int): 一个整数参数。其具体用途未知，取决于 'code.py' 的原始逻辑。
+                 在此示意性实现中，可能会象征性地使用它，例如选择前 n 行或进行某种聚合。
+
+    返回:
+        List[str]: 一个字符串列表。根据任务描述的签名。
+                   此列表的内容在此示意性实现中将是转换后的数值指标。
+                   例如：["sharpe:1.5", "annual_return:0.12", "max_drawdown:-0.05"]
+    """
+    logger.info(f"开始执行 fitness_fun (示意性实现)。输入 DataFrame 行数: {len(Data)}, n: {n}")
+
+    if Data.empty:
+        logger.warning("fitness_fun 接收到空的 DataFrame，返回空列表。")
+        return []
+
+    # --- 以下为示意性计算逻辑 ---
+    # 实际逻辑需要从 code.py 移植或根据需求重新定义。
+
+    # 假设的列名，这些列需要在输入的 DataFrame 'Data' 中存在
+    returns_col = 'daily_returns' # 假设有每日收益率列
+    benchmark_returns_col = 'benchmark_daily_returns' # 假设有基准每日收益率列 (可选)
+    annualization_factor = 252 # 假设一年252个交易日
+
+
+    # 示例1：计算（年化）夏普比率的字符串表示
+    # 这里只是非常粗略的计算，实际夏普比率计算更复杂
+    sharpe_str = "sharpe_ratio:N/A"
+    if returns_col in Data.columns:
+        # 假设 n 代表回测期天数，如果不是，这个年化因子需要调整
+        try:
+            # 简单计算，未考虑无风险利率
+            mean_return = Data[returns_col].mean()
+            std_return = Data[returns_col].std()
+            if std_return is not None and std_return > 1e-9: # 避免除以非常小的值或零
+                # 假设 n 是用于选择前 n 条数据进行计算，或 n 是年化中的一部分
+                # 这里简单地使用整个Data的均值和标准差
+                simulated_sharpe = (mean_return / std_return) * (annualization_factor ** 0.5)
+                sharpe_str = f"sharpe_ratio:{simulated_sharpe:.4f}"
+            elif std_return is not None and std_return <= 1e-9 and std_return >= 0 : # 如果标准差非常接近0（但非负）
+                sharpe_str = "sharpe_ratio:波动过小" if mean_return == 0 else "sharpe_ratio:波动为零但有均值"
+
+            else: # std_return is None or NaN
+                sharpe_str = "sharpe_ratio:波动无法计算"
+        except Exception as e:
+            logger.error(f"计算夏普比率时出错: {e}")
+            sharpe_str = "sharpe_ratio:计算错误"
+
+    # 示例2：计算总收益率的字符串表示
+    total_return_str = "total_return:N/A"
+    if returns_col in Data.columns:
+        try:
+            # 假设 n 是用于选择数据范围，这里使用 Data 的前 n 行 (如果 n 合法)
+            # 如果 n 无效或未指定，则使用整个数据集
+            data_subset = Data
+            if n > 0 and n <= len(Data):
+                data_subset = Data.head(n)
+            elif n > len(Data):
+                 logger.warning(f"fitness_fun: n ({n}) 大于 DataFrame 行数 ({len(Data)})，将使用所有数据计算总收益率。")
+            # else n <= 0 or invalid, use all data
+
+            if not data_subset.empty:
+                total_ret = (1 + data_subset[returns_col]).prod() - 1
+                total_return_str = f"total_return:{total_ret:.4f}"
+            else:
+                total_return_str = "total_return:无数据计算" # Should not happen if Data is not empty
+        except Exception as e:
+            logger.error(f"计算总收益率时出错: {e}")
+            total_return_str = "total_return:计算错误"
+
+    # 示例3：一个基于参数 n 的简单指标 (纯粹示意)
+    n_based_metric_str = f"n_param_value:{n}"
+
+    # 结果列表
+    results_list = [sharpe_str, total_return_str, n_based_metric_str]
+
+    # 假设还需要返回其他指标，例如相对于基准的表现（如果提供了基准数据）
+    if benchmark_returns_col in Data.columns and returns_col in Data.columns:
+        try:
+            alpha_val = (Data[returns_col] - Data[benchmark_returns_col]).mean() * annualization_factor
+            results_list.append(f"alpha_vs_benchmark:{alpha_val:.4f}")
+        except Exception as e:
+            logger.warning(f"计算相对基准Alpha时出错: {e}")
+            results_list.append("alpha_vs_benchmark:计算错误")
+
+    logger.info(f"fitness_fun (示意性实现) 计算完成，结果: {results_list}")
+    return results_list
+
+# ... (文件末尾)
 
 def depth_one_trees(
     terminal_vals: List[str],  # 参数名修改以避免与全局变量混淆，下同
