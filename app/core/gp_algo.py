@@ -6,6 +6,7 @@ import random
 from typing import Optional, List
 import logging # 导入 logging 模块
 import pandas as pd # 导入 pandas 用于数据处理，特别是 fitness_fun 中的 DataFrame 操作
+import re # 导入正则表达式模块
 
 logger = logging.getLogger(__name__) # 获取 logger 实例，以便使用 logger.warning
 
@@ -201,6 +202,142 @@ def tree_to_alpha(tree: Node) -> str:
     logger.info(f"树成功转换为 Alpha 表达式: '{expression_str}'") # 记录生成的表达式
     return expression_str
 
+# (确保全局的操作符和终端列表已定义并可在此函数作用域内访问:
+#  terminal_values, ts_ops, binary_ops, unary_ops, ts_ops_values)
+
+def _build_tree_from_tokens(tokens: List[str]) -> Optional[Node]:
+    """
+    递归辅助函数，根据词法单元列表构建表达式树。
+    这是一个递归下降解析器的核心。它通过消耗列表中的词法单元来构建树。
+
+    参数:
+        tokens (List[str]): 由 parse_expression 生成的词法单元列表。
+                            此列表在递归调用中会被修改（通过 pop(0)）。
+
+    返回:
+        Optional[Node]: 构建的表达式树的根节点。
+                        如果词法单元序列无效或不完整，则返回 None 或抛出异常。
+
+    异常:
+        ValueError: 如果遇到语法错误，例如括号不匹配、参数数量错误等。
+    """
+    if not tokens:
+        # logger.error("_build_tree_from_tokens: 接收到空的词法单元列表。")
+        # raise ValueError("空的词法单元列表，无法构建树。")
+        return None
+
+    token = tokens.pop(0) # 消耗词法单元
+    # logger.debug(f"_build_tree_from_tokens: 当前处理 '{token}', 剩余: {tokens[:5]}")
+
+    if token in terminal_values or token in ts_ops_values:
+        # logger.debug(f"创建叶子节点: Node('{token}')")
+        return Node(token)
+
+    elif token in unary_ops:
+        # logger.debug(f"处理一元操作符: '{token}'")
+        if not tokens or tokens.pop(0) != '(':
+            raise ValueError(f"语法错误：一元操作符 '{token}' 后缺少 '('。")
+
+        left_child = _build_tree_from_tokens(tokens)
+        if left_child is None:
+            # 此处表示 '(' 之后没有有效的子表达式
+            raise ValueError(f"语法错误：一元操作符 '{token}' 的参数为空或无效。")
+
+        if not tokens or tokens.pop(0) != ')':
+            raise ValueError(f"语法错误：一元操作符 '{token}' (参数: {left_child.value if left_child else 'None'}) 后缺少匹配的 ')'。")
+
+        # logger.debug(f"创建一元节点: Node('{token}', left={left_child!r})")
+        return Node(token, left=left_child)
+
+    elif token in binary_ops or token in ts_ops:
+        # logger.debug(f"处理二元/时间序列操作符: '{token}'")
+        if not tokens or tokens.pop(0) != '(':
+            raise ValueError(f"语法错误：操作符 '{token}' 后缺少 '('。")
+
+        left_child = _build_tree_from_tokens(tokens)
+        if left_child is None:
+            raise ValueError(f"语法错误：操作符 '{token}' 的第一个参数为空或无效。")
+
+        if not tokens or tokens.pop(0) != ',':
+            raise ValueError(f"语法错误：操作符 '{token}' 的参数之间缺少 ','。")
+
+        right_child = _build_tree_from_tokens(tokens)
+        if right_child is None:
+            raise ValueError(f"语法错误：操作符 '{token}' 的第二个参数为空或无效。")
+
+        if not tokens or tokens.pop(0) != ')':
+            raise ValueError(f"语法错误：操作符 '{token}' (参数1: {left_child.value if left_child else 'None'}, 参数2: {right_child.value if right_child else 'None'}) 后缺少匹配的 ')'。")
+
+        # logger.debug(f"创建二元/时间序列节点: Node('{token}', left={left_child!r}, right={right_child!r})")
+        return Node(token, left=left_child, right=right_child)
+
+    else:
+        # 如果 token 不是已知的终端、值或操作符
+        raise ValueError(f"语法错误：未知的词法单元或非预期的符号 '{token}' 作为表达式的开头。")
+
+def alpha_to_tree(expression_str: str) -> Optional[Node]:
+    """
+    将 Alpha 表达式字符串安全地转换为对应的表达式树结构。
+
+    此函数首先使用 `parse_expression` 对输入字符串进行词法分析，
+    然后使用 `_build_tree_from_tokens` 根据生成的词法单元列表递归构建树。
+
+    参数:
+        expression_str (str): 要解析的 Alpha 表达式字符串。
+                              例如："add(rank(close),vwap)"
+
+    返回:
+        Optional[Node]: 构建的表达式树的根节点。
+                        如果表达式无效、解析失败或包含语法错误，则返回 None。
+                        具体的错误信息会通过日志记录。
+    """
+    if not isinstance(expression_str, str) or not expression_str.strip():
+        logger.error("alpha_to_tree 接收到无效或空的表达式字符串。")
+        return None
+
+    logger.info(f"开始将表达式字符串转换为树: '{expression_str}'")
+
+    try:
+        # 1. 词法分析：将字符串分解为词法单元列表
+        tokens = parse_expression(expression_str)
+        if not tokens:
+            # parse_expression 在遇到空输入或某些错误时可能返回空列表
+            logger.error(f"表达式 '{expression_str}' 词法分析失败，未生成任何词法单元。")
+            return None
+
+        # logger.debug(f"词法分析结果 for '{expression_str}': {tokens}")
+
+        # 创建词法单元列表的副本，因为 _build_tree_from_tokens 会修改它 (pop)
+        # 这样如果后续需要原始 tokens 列表（例如用于更详细的错误报告），它仍然可用。
+        tokens_copy = list(tokens)
+
+        # 2. 语法分析与树构建：从词法单元列表构建树
+        tree_root = _build_tree_from_tokens(tokens_copy)
+
+        # 3. 检查是否所有词法单元都被消耗完毕
+        # 如果 _build_tree_from_tokens 成功返回了一个树，但 tokens_copy 中仍有剩余，
+        # 这通常意味着表达式末尾有多余的、未被解析的字符（例如，括号不匹配导致的 "())"）。
+        if tree_root is not None and tokens_copy:
+            logger.error(f"语法分析后仍有未消耗的词法单元: {tokens_copy}。表达式可能不完整或末尾有额外字符。原始表达式: '{expression_str}'")
+            # 根据策略，可以将这种情况视为解析失败
+            return None
+
+        if tree_root is None:
+            # _build_tree_from_tokens 在无法构建树时（例如，tokens_copy一开始就为空，或第一个token无法构成树的根）会返回 None
+            logger.error(f"未能从词法单元列表构建有效的表达式树。原始表达式: '{expression_str}'，词法单元: {tokens}")
+            return None
+
+        logger.info(f"表达式 '{expression_str}' 成功转换为树。根节点: {tree_root!r}")
+        return tree_root
+
+    except ValueError as e: # 捕获来自 parse_expression 或 _build_tree_from_tokens 的语法/词法错误
+        logger.error(f"解析表达式 '{expression_str}' 时发生错误: {e}")
+        return None
+    except Exception as e: # 捕获其他意外错误
+        logger.error(f"解析表达式 '{expression_str}' 时发生未预料的系统错误: {e}", exc_info=True)
+        return None
+
+# ... (文件末尾)
 # ... (后续将定义 fitness_fun 等) ...
 # 确保 pandas 已导入:
 # import pandas as pd # 应已在文件顶部
