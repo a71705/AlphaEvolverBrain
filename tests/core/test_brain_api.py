@@ -11,7 +11,13 @@ import time
 
 # 从待测试的模块 app.core.brain_api 导入 BrainApiSession 类。
 # 假设测试运行时，项目的根目录在 Python 的搜索路径中。
-from app.core.brain_api import BrainApiSession, TOKEN_URL # 假设 USER_ME_URL 在模块中定义用于测试
+from app.core.brain_api import (
+    BrainApiSession,
+    TOKEN_URL,
+    SIMULATIONS_URL,
+    SIMULATION_PROGRESS_URL_TEMPLATE,
+    MULTISIMULATION_PROGRESS_URL_TEMPLATE
+)
 
 # 定义一个测试类，继承自 unittest.TestCase。
 class TestBrainApiSession(unittest.TestCase):
@@ -249,11 +255,155 @@ class TestBrainApiSession(unittest.TestCase):
         # 总共调用次数 = 1 (初始尝试) + 1 (重试次数) = 2
         self.assertEqual(mock_session_instance.request.call_count, self.session._max_retries + 1)
 
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    def test_start_simulation_single_success(self, mock_request_with_retry):
+        """测试 start_simulation 方法成功提交单个模拟。"""
+        # 模拟 _request_with_retry 的成功返回值
+        mock_response = mock.MagicMock(spec=requests.Response) # spec确保模拟对象行为类似Response
+        mock_response.status_code = 201 # 例如，创建成功
+        mock_response.json.return_value = {"simulation_id": "sim_123", "status": "PENDING"}
+        mock_request_with_retry.return_value = mock_response
+
+        simulate_data = {"expression": "close", "settings": {"universe": "TOP100"}}
+        response = self.session.start_simulation(simulate_data)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json(), {"simulation_id": "sim_123", "status": "PENDING"})
+        # 验证 _request_with_retry 被正确调用
+        mock_request_with_retry.assert_called_once_with(
+            "POST",
+            SIMULATIONS_URL, # 假设 SIMULATIONS_URL 在模块中定义
+            json=simulate_data,
+            timeout=30
+        )
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    def test_start_simulation_batch_success(self, mock_request_with_retry):
+        """测试 start_simulation 方法成功提交批量模拟。"""
+        mock_response = mock.MagicMock(spec=requests.Response)
+        mock_response.status_code = 202 # 例如，批量任务被接受
+        mock_response.json.return_value = {"job_id": "job_abc", "status": "QUEUED"}
+        mock_request_with_retry.return_value = mock_response
+
+        simulate_data_batch = [
+            {"expression": "close", "settings": {"universe": "TOP100"}},
+            {"expression": "open", "settings": {"universe": "TOP200"}}
+        ]
+        response = self.session.start_simulation(simulate_data_batch)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {"job_id": "job_abc", "status": "QUEUED"})
+        mock_request_with_retry.assert_called_once_with(
+            "POST",
+            SIMULATIONS_URL,
+            json=simulate_data_batch,
+            timeout=30
+        )
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    @mock.patch('app.core.brain_api.time.sleep', return_value=None) # 阻止 time.sleep
+    def test_simulation_progress_completed(self, mock_sleep, mock_request_with_retry):
+        """测试 simulation_progress 方法轮询到 COMPLETED 状态。"""
+        simulation_id = "sim_xyz"
+        # 模拟 API 按顺序返回: 第一次 RUNNING, 第二次 COMPLETED
+        mock_running_response = mock.MagicMock(spec=requests.Response)
+        mock_running_response.json.return_value = {"status": "RUNNING", "simulation_id": simulation_id}
+
+        mock_completed_response = mock.MagicMock(spec=requests.Response)
+        alpha_details = {"sharpe": 2.5, "returns": 0.15}
+        mock_completed_response.json.return_value = {"status": "COMPLETED", "alpha_json": alpha_details, "simulation_id": simulation_id}
+
+        mock_request_with_retry.side_effect = [mock_running_response, mock_completed_response]
+
+        result = self.session.simulation_progress(simulation_id, polling_interval=1, timeout=10)
+
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(result["alpha_json"], alpha_details)
+        self.assertEqual(result["simulation_id"], simulation_id)
+        # 验证 _request_with_retry 被调用了两次
+        self.assertEqual(mock_request_with_retry.call_count, 2)
+        expected_url = SIMULATION_PROGRESS_URL_TEMPLATE.format(simulation_id=simulation_id)
+        mock_request_with_retry.assert_any_call("GET", expected_url, timeout=15)
+
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    @mock.patch('app.core.brain_api.time.sleep', return_value=None)
+    def test_simulation_progress_failed(self, mock_sleep, mock_request_with_retry):
+        """测试 simulation_progress 方法轮询到 FAILED 状态。"""
+        simulation_id = "sim_fail"
+        error_message = "Simulation failed due to invalid expression."
+        mock_failed_response = mock.MagicMock(spec=requests.Response)
+        mock_failed_response.json.return_value = {"status": "FAILED", "message": error_message, "details": {"code": 101}, "simulation_id": simulation_id}
+        mock_request_with_retry.return_value = mock_failed_response # 第一次就失败
+
+        result = self.session.simulation_progress(simulation_id, polling_interval=1, timeout=5)
+
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["message"], error_message)
+        self.assertEqual(result["details"], {"code": 101})
+        self.assertEqual(result["simulation_id"], simulation_id)
+        mock_request_with_retry.assert_called_once()
+
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    @mock.patch('app.core.brain_api.time.time') # 模拟 time.time 来控制超时
+    @mock.patch('app.core.brain_api.time.sleep', return_value=None)
+    def test_simulation_progress_timeout(self, mock_sleep, mock_time, mock_request_with_retry):
+        """测试 simulation_progress 方法轮询超时。"""
+        simulation_id = "sim_timeout"
+        # 模拟 API 总是返回 RUNNING
+        mock_running_response = mock.MagicMock(spec=requests.Response)
+        mock_running_response.json.return_value = {"status": "RUNNING", "simulation_id": simulation_id}
+        mock_request_with_retry.return_value = mock_running_response
+
+        # 模拟时间流逝以触发超时
+        # 假设 timeout=3, polling_interval=1
+        # time.time() 会被调用: 初始, 第一次循环, 第二次循环, 第三次循环 (超时)
+        # (0) (1) (2) (3)
+        mock_time.side_effect = [0, 0.5, 1.5, 2.5, 3.5] # 模拟时间点
+
+        result = self.session.simulation_progress(simulation_id, polling_interval=1, timeout=3)
+
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertTrue("polling timed out" in result["message"])
+        self.assertEqual(result["simulation_id"], simulation_id)
+        # 根据 timeout 和 polling_interval，计算预期的调用次数
+        # timeout=3, interval=1. 循环会在时间 > 3 时退出。
+        # t=0 (start), t=0.5 (iter1), t=1.5 (iter2), t=2.5 (iter3), t=3.5 (timeout check)
+        # 应该有3次调用 _request_with_retry
+        self.assertEqual(mock_request_with_retry.call_count, 3)
+
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    @mock.patch('app.core.brain_api.time.sleep', return_value=None)
+    def test_multisimulation_progress_completed(self, mock_sleep, mock_request_with_retry):
+        """测试 multisimulation_progress 方法轮询到 COMPLETED 状态。"""
+        job_id = "job_all_done"
+        mock_running_response = mock.MagicMock(spec=requests.Response)
+        mock_running_response.json.return_value = {"status": "RUNNING", "job_id": job_id, "completed_tasks": 1, "total_tasks": 2}
+
+        mock_completed_response = mock.MagicMock(spec=requests.Response)
+        batch_results = [{"alpha_id": "a1", "sharpe": 1.0}, {"alpha_id": "a2", "sharpe": 1.5}]
+        mock_completed_response.json.return_value = {"status": "COMPLETED", "results": batch_results, "job_id": job_id}
+
+        mock_request_with_retry.side_effect = [mock_running_response, mock_completed_response]
+
+        result = self.session.multisimulation_progress(job_id, polling_interval=1, timeout=10)
+
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(result["results"], batch_results)
+        self.assertEqual(result["job_id"], job_id)
+        self.assertEqual(mock_request_with_retry.call_count, 2)
+        expected_url = MULTISIMULATION_PROGRESS_URL_TEMPLATE.format(job_id=job_id)
+        mock_request_with_retry.assert_any_call("GET", expected_url, timeout=20)
+
+    # 可以为 multisimulation_progress 添加 FAILED 和 TIMEOUT 的测试，类似于 simulation_progress
+    # 这里省略以保持简洁，但实际项目中应覆盖这些场景
 
     @mock.patch('app.core.brain_api.time.time')
     @mock.patch('app.core.brain_api.time.sleep', return_value=None)
     @mock.patch('app.core.brain_api.requests.Session', new_callable=mock.MagicMock)
-    def test_request_with_retry_handles_401_and_refreshes_token(self, mock_requests_session_cls, mock_sleep, mock_current_time):
+    def test_request_with_retry_handles_401_and_refreshes_token(self, mock_requests_session_cls, mock_sleep, mock_current_time): # mock_current_time is already defined by @mock.patch('app.core.brain_api.time.time')
         """测试 _request_with_retry 处理401错误，刷新token并成功重试。"""
         mock_session_instance = mock_requests_session_cls.return_value
         self.session._session = mock_session_instance

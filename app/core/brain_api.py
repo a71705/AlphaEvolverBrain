@@ -12,7 +12,20 @@ logger = logging.getLogger(__name__)
 # 注意：请根据实际的 API 文档替换为正确的 URL
 BRAIN_BASE_URL = "https://api.worldquantbrain.com" # 示例 URL
 TOKEN_URL = f"{BRAIN_BASE_URL}/auth/token" # 示例认证 URL
-SIMULATIONS_URL = f"{BRAIN_BASE_URL}/simulations" # 示例模拟 URL
+
+# 模拟提交相关的端点
+SIMULATIONS_URL = f"{BRAIN_BASE_URL}/simulations" # 用于提交单个或批量模拟
+
+# 模拟进度相关的端点 (模板字符串，需要替换 ID)
+# SIMULATION_PROGRESS_URL_TEMPLATE: 获取单个模拟任务进度的 URL 模板。
+# 需要将 {simulation_id} 替换为实际的模拟任务 ID。
+SIMULATION_PROGRESS_URL_TEMPLATE = f"{BRAIN_BASE_URL}/simulations/{{simulation_id}}"
+# MULTISIMULATION_PROGRESS_URL_TEMPLATE: 获取批量模拟任务进度的 URL 模板。
+# 需要将 {job_id} 替换为实际的批量任务 ID。
+MULTISIMULATION_PROGRESS_URL_TEMPLATE = f"{BRAIN_BASE_URL}/simulations/batch/{{job_id}}" # 或类似的路径，取决于API设计
+
+# 用户信息端点 (在 DEV-005 的测试代码中用到，实际应用中可能不需要或不同)
+USER_ME_URL = f"{BRAIN_BASE_URL}/users/me"
 
 class BrainApiSession:
     """
@@ -223,8 +236,212 @@ class BrainApiSession:
 
         raise RuntimeError(f"请求 {method} {url} 在所有重试尝试后均失败。")
 
+    def start_simulation(self, simulate_data: dict or list) -> requests.Response:
+        """
+        提交一个或多个 Alpha 表达式进行模拟。
+
+        参数:
+            simulate_data (dict or list): 包含模拟请求所需数据的字典（用于单个模拟）
+                                         或字典列表（用于批量模拟）。
+                                         此数据的具体结构取决于 WorldQuant Brain API 的要求。
+                                         例如:
+                                         单个模拟: {"expression": "close", "settings": {...}}
+                                         批量模拟: [{"expression": "close", ...}, {"expression": "open", ...}]
+
+        返回:
+            requests.Response: API 返回的原始响应对象。
+                               调用者应检查响应的状态码和内容。
+                               成功提交模拟后，响应体中通常会包含一个或多个任务 ID (例如 simulation_id, job_id)。
+
+        异常:
+            requests.exceptions.RequestException: 如果 API 请求失败且重试耗尽。
+            RuntimeError: 如果认证失败。
+        """
+        # 记录将要提交的数据的类型和简要信息 (例如，如果是列表，则记录列表长度)
+        if isinstance(simulate_data, list):
+            logger.info(f"准备向 {SIMULATIONS_URL} 提交批量模拟请求，包含 {len(simulate_data)} 个 Alpha。")
+        else:
+            logger.info(f"准备向 {SIMULATIONS_URL} 提交单个模拟请求。")
+
+        # 记录提交数据的摘要或关键部分 (注意不要记录过多或敏感信息)
+        # logger.debug(f"提交的模拟数据 (部分): {str(simulate_data)[:200]}") # 截断避免日志过长
+
+        # 使用 _request_with_retry 方法发送 POST 请求
+        # SIMULATIONS_URL 是在模块级别定义的提交模拟的端点
+        # json=simulate_data 将 simulate_data 字典或列表序列化为 JSON 并作为请求体发送
+        try:
+            response = self._request_with_retry("POST", SIMULATIONS_URL, json=simulate_data, timeout=30) # 增加超时时间以应对可能的网络延迟或服务端处理
+            logger.info(f"模拟提交请求已发送至 {SIMULATIONS_URL}。响应状态码: {response.status_code}")
+            # logger.debug(f"模拟提交响应内容: {response.text}") # 响应内容可能较大，谨慎记录
+            return response
+        except requests.exceptions.RequestException as e:
+            logger.error(f"提交模拟请求到 {SIMULATIONS_URL} 失败: {e}")
+            raise # 将异常重新抛出，以便上层调用者处理
+        except RuntimeError as e:
+            logger.error(f"提交模拟请求到 {SIMULATIONS_URL} 因认证问题失败: {e}")
+            raise
+
+    def simulation_progress(self, simulation_id: str, polling_interval: int = 5, timeout: int = 300) -> dict:
+        """
+        轮询单个 Alpha 模拟任务的进度直到完成、失败或超时。
+
+        参数:
+            simulation_id (str): 要查询进度的模拟任务的 ID。
+                                 通常从 start_simulation 方法的响应中获取。
+            polling_interval (int): 轮询 API 的时间间隔（秒）。默认为 5 秒。
+            timeout (int): 等待模拟完成的总超时时间（秒）。默认为 300 秒 (5 分钟)。
+
+        返回:
+            dict: 一个包含模拟结果或错误信息的字典。
+                  成功时，例如: {"status": "COMPLETED", "alpha_json": {...}, "simulation_id": "..."}
+                  失败时，例如: {"status": "FAILED", "message": "Error details", "simulation_id": "..."}
+                  超时时，例如: {"status": "TIMEOUT", "message": "Simulation polling timed out.", "simulation_id": "..."}
+        """
+        if not simulation_id:
+            logger.error("查询模拟进度失败：simulation_id 不能为空。")
+            return {"status": "ERROR", "message": "simulation_id is required.", "simulation_id": simulation_id}
+
+        # 构建特定模拟任务的进度查询 URL
+        progress_url = SIMULATION_PROGRESS_URL_TEMPLATE.format(simulation_id=simulation_id)
+        logger.info(f"开始轮询模拟任务 {simulation_id} 的进度，URL: {progress_url}，间隔: {polling_interval}s，超时: {timeout}s。")
+
+        start_time = time.time() # 记录开始时间，用于判断超时
+
+        while True:
+            current_time = time.time()
+            # 检查是否超时
+            if current_time - start_time > timeout:
+                logger.warning(f"轮询模拟任务 {simulation_id} 超时（超过 {timeout} 秒）。")
+                return {"status": "TIMEOUT", "message": f"Simulation {simulation_id} polling timed out after {timeout} seconds.", "simulation_id": simulation_id}
+
+            try:
+                logger.debug(f"正在查询模拟任务 {simulation_id} 的进度...")
+                response = self._request_with_retry("GET", progress_url, timeout=15) # 设置请求超时
+
+                # 检查响应是否成功 (2xx 状态码已由 _request_with_retry 处理)
+                # 现在解析响应内容
+                progress_data = response.json()
+                # logger.debug(f"模拟任务 {simulation_id} 进度响应: {progress_data}")
+
+                # 从响应中获取模拟状态，状态字段名可能因 API 而异 (例如 "status", "state")
+                # 假设状态字段为 "status"
+                simulation_status = progress_data.get("status", "").upper() # 转换为大写以便比较
+
+                if simulation_status == "COMPLETED":
+                    logger.info(f"模拟任务 {simulation_id} 已成功完成。")
+                    # 假设完成时，响应中包含名为 "alpha_json" 或 "result" 的字段包含 Alpha 的详细信息
+                    alpha_result = progress_data.get("alpha_json") or progress_data.get("result") or progress_data
+                    return {"status": "COMPLETED", "alpha_json": alpha_result, "simulation_id": simulation_id}
+
+                elif simulation_status == "FAILED":
+                    logger.error(f"模拟任务 {simulation_id} 执行失败。")
+                    # 提取错误信息，特别是 "message" 字段
+                    error_message = progress_data.get("message", "Unknown error during simulation.")
+                    error_details = progress_data.get("details") # 可能包含更详细的错误信息
+                    return {"status": "FAILED", "message": error_message, "details": error_details, "simulation_id": simulation_id}
+
+                elif simulation_status in ["RUNNING", "PENDING", "QUEUED"]:
+                    logger.info(f"模拟任务 {simulation_id} 仍在进行中，状态: {simulation_status}。将在 {polling_interval} 秒后再次查询。")
+
+                else: # 未知或非预期的状态
+                    logger.warning(f"模拟任务 {simulation_id} 返回未知状态: '{simulation_status}'. 原始响应: {progress_data}")
+                    # 可以选择继续轮询或将其视为一种错误
+                    # return {"status": "UNKNOWN_STATUS", "message": f"Unknown simulation status: {simulation_status}", "data": progress_data, "simulation_id": simulation_id}
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"查询模拟任务 {simulation_id} 进度时发生请求错误: {e}。将在 {polling_interval} 秒后重试（如果未超时）。")
+                # 即使请求失败，也继续轮询，除非超时，因为这可能是暂时的网络问题
+            except ValueError as e: # JSON 解析错误
+                logger.error(f"解析模拟任务 {simulation_id} 进度响应时发生错误: {e}。响应内容可能不是有效的 JSON。将在 {polling_interval} 秒后重试。")
+            except Exception as e: # 其他意外错误
+                logger.error(f"查询模拟任务 {simulation_id} 进度时发生意外错误: {e}", exc_info=True)
+                # 对于意外错误，可以选择停止轮询并返回错误
+                # return {"status": "ERROR", "message": f"Unexpected error polling simulation {simulation_id}: {str(e)}", "simulation_id": simulation_id}
+
+
+            # 等待指定的轮询间隔
+            time.sleep(polling_interval)
+
+    def multisimulation_progress(self, job_id: str, polling_interval: int = 10, timeout: int = 600) -> dict:
+        """
+        轮询批量 Alpha 模拟任务的进度直到完成、失败或超时。
+
+        参数:
+            job_id (str): 要查询进度的批量模拟任务的 ID。
+                          通常从 start_simulation 方法（当提交批量数据时）的响应中获取。
+            polling_interval (int): 轮询 API 的时间间隔（秒）。默认为 10 秒。
+            timeout (int): 等待批量模拟完成的总超时时间（秒）。默认为 600 秒 (10 分钟)。
+
+        返回:
+            dict: 一个包含批量模拟结果或错误信息的字典。
+                  成功时，例如: {"status": "COMPLETED", "results": [{...}, {...}], "job_id": "..."}
+                           (其中 results 是一个包含每个子 Alpha 结果的列表)
+                  失败时，例如: {"status": "FAILED", "message": "Error details", "job_id": "..."}
+                  超时时，例如: {"status": "TIMEOUT", "message": "Batch simulation polling timed out.", "job_id": "..."}
+        """
+        if not job_id:
+            logger.error("查询批量模拟进度失败：job_id 不能为空。")
+            return {"status": "ERROR", "message": "job_id is required.", "job_id": job_id}
+
+        # 构建特定批量模拟任务的进度查询 URL
+        progress_url = MULTISIMULATION_PROGRESS_URL_TEMPLATE.format(job_id=job_id)
+        logger.info(f"开始轮询批量模拟任务 {job_id} 的进度，URL: {progress_url}，间隔: {polling_interval}s，超时: {timeout}s。")
+
+        start_time = time.time() # 记录开始时间，用于判断超时
+
+        while True:
+            current_time = time.time()
+            # 检查是否超时
+            if current_time - start_time > timeout:
+                logger.warning(f"轮询批量模拟任务 {job_id} 超时（超过 {timeout} 秒）。")
+                return {"status": "TIMEOUT", "message": f"Batch simulation {job_id} polling timed out after {timeout} seconds.", "job_id": job_id}
+
+            try:
+                logger.debug(f"正在查询批量模拟任务 {job_id} 的进度...")
+                response = self._request_with_retry("GET", progress_url, timeout=20) # 增加 GET 请求的超时
+
+                progress_data = response.json()
+                # logger.debug(f"批量模拟任务 {job_id} 进度响应: {progress_data}")
+
+                # 从响应中获取批量模拟状态
+                # 假设状态字段为 "status" 或 "job_status"
+                job_status = progress_data.get("status", progress_data.get("job_status", "")).upper()
+
+                if job_status == "COMPLETED":
+                    logger.info(f"批量模拟任务 {job_id} 已成功完成。")
+                    # 假设完成时，响应中包含名为 "results" 或 "simulations" 的列表，其中包含每个子 Alpha 的结果
+                    results_list = progress_data.get("results") or progress_data.get("simulations") or progress_data
+                    return {"status": "COMPLETED", "results": results_list, "job_id": job_id}
+
+                elif job_status == "FAILED":
+                    logger.error(f"批量模拟任务 {job_id} 执行失败。")
+                    error_message = progress_data.get("message", "Unknown error during batch simulation.")
+                    error_details = progress_data.get("details")
+                    return {"status": "FAILED", "message": error_message, "details": error_details, "job_id": job_id}
+
+                elif job_status in ["RUNNING", "PENDING", "QUEUED", "IN_PROGRESS"]:
+                    # API 可能还会提供更详细的进度，例如已完成的子任务数量
+                    completed_tasks = progress_data.get("completed_tasks", 0)
+                    total_tasks = progress_data.get("total_tasks", 0)
+                    progress_percent = progress_data.get("progress_percentage", 0)
+                    logger.info(f"批量模拟任务 {job_id} 仍在进行中，状态: {job_status} (已完成: {completed_tasks}/{total_tasks}, 进度: {progress_percent}%). 将在 {polling_interval} 秒后再次查询。")
+
+                else: # 未知或非预期的状态
+                    logger.warning(f"批量模拟任务 {job_id} 返回未知状态: '{job_status}'. 原始响应: {progress_data}")
+                    # return {"status": "UNKNOWN_STATUS", "message": f"Unknown batch simulation status: {job_status}", "data": progress_data, "job_id": job_id}
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"查询批量模拟任务 {job_id} 进度时发生请求错误: {e}。将在 {polling_interval} 秒后重试（如果未超时）。")
+            except ValueError as e: # JSON 解析错误
+                logger.error(f"解析批量模拟任务 {job_id} 进度响应时发生错误: {e}。响应内容可能不是有效的 JSON。将在 {polling_interval} 秒后重试。")
+            except Exception as e: # 其他意外错误
+                logger.error(f"查询批量模拟任务 {job_id} 进度时发生意外错误: {e}", exc_info=True)
+                # return {"status": "ERROR", "message": f"Unexpected error polling batch simulation {job_id}: {str(e)}", "job_id": job_id}
+
+            time.sleep(polling_interval)
+
     # === 后续任务中将添加其他与 Brain API 交互的方法 ===
-    # 例如: start_simulation, simulation_progress, get_datasets, get_datafields 等
+    # 例如: get_datasets, get_datafields 等
     # 这些方法都应该使用 self._request_with_retry 来执行实际的 API 调用
 
 # 示例用法 (用于基本测试，实际测试应使用单元测试框架)
