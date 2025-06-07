@@ -1,0 +1,46 @@
+# Git 相关文件和目录
+.git
+.gitignore
+
+# Python 缓存文件和目录
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 虚拟环境目录
+.venv/
+venv/
+env/
+ENV/
+*.env
+
+# IDE 和编辑器配置文件
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 测试报告和覆盖率数据
+htmlcov/
+.coverage
+.pytest_cache/
+nosetests.xml
+coverage.xml
+
+# 构建和分发产物
+build/
+dist/
+*.egg-info/
+*.egg
+
+# 操作系统特定文件
+.DS_Store
+Thumbs.db
+
+# 日志文件
+*.log
+
+# 其他临时文件
+*.tmp
+*.swp

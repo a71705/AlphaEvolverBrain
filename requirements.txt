@@ -1,0 +1,16 @@
+# FastAPI: 用于构建 API 的现代化、高性能 Python Web 框架。
+fastapi
+
+# Uvicorn: ASGI 服务器，用于运行 FastAPI 应用。
+# [standard] 包含了 cython 编译的依赖，提供更好的性能。
+uvicorn[standard]
+
+# Redis: 用于与 Redis 数据库交互的 Python 客户端库。
+# Redis 将用作消息队列 (RQ) 和可能的缓存。
+redis
+
+# RQ (Redis Queue): 基于 Redis 的简单 Python 库，用于队列作业和处理后台任务。
+rq
+
+# python-dotenv: 用于从 .env 文件中读取环境变量，方便开发环境配置。
+python-dotenv
