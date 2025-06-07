@@ -306,6 +306,231 @@ def fitness_fun(Data: pd.DataFrame, n: int) -> List[str]: # List 来自 typing
 
 # ... (文件末尾)
 
+def copy_tree(original_node: Optional[Node]) -> Optional[Node]:
+    """
+    深度复制一个表达式树。
+
+    通过递归方式创建一个与原始树结构相同、节点值相同的新树。
+    对副本的修改不会影响原始树。
+
+    参数:
+        original_node (Optional[Node]): 要复制的原始树的根节点。
+                                         如果为 None，则表示空树。
+
+    返回:
+        Optional[Node]: 新创建的树的根节点副本。如果原始节点为 None，则返回 None。
+    """
+    # 基本情况：如果原始节点是 None (空树或叶子节点的子节点)，则副本也是 None。
+    if original_node is None:
+        return None
+
+    # 递归复制左子树。
+    left_copy = copy_tree(original_node.left)
+    # 递归复制右子树。
+    right_copy = copy_tree(original_node.right)
+
+    # 创建当前节点的新副本，其值为原始节点的值，
+    # 子节点为前面递归复制得到的左右子树副本。
+    copied_node = Node(original_node.value, left=left_copy, right=right_copy)
+
+    # logger.debug(f"已复制节点: {original_node!r} -> {copied_node!r}")
+    return copied_node
+
+def _collect_nodes(node: Optional[Node], nodes_list: List[Node]) -> None:
+    """
+    递归辅助函数，用于收集给定树中所有的节点。
+
+    采用前序遍历（根-左-右）的方式将树中所有节点添加到一个列表中。
+    这个列表可以用于后续操作，例如随机选择一个节点进行变异或交叉。
+
+    参数:
+        node (Optional[Node]): 当前正在访问的树节点。如果为 None，则不执行任何操作。
+        nodes_list (List[Node]): 用于存储收集到的节点的列表。
+                                 调用者应传入一个空列表，此函数会向其中填充节点。
+                                 (注意：列表是可变对象，函数直接修改传入的列表)
+    返回:
+        None: 此函数不返回值，而是直接修改 `nodes_list`。
+    """
+    if node is None:
+        return # 基本情况：如果节点为空，则结束当前路径的递归
+
+    # 将当前节点添加到列表中 (前序遍历：先处理根节点)
+    nodes_list.append(node)
+
+    # 递归访问左子树
+    if node.left: # 只有当左子节点存在时才递归
+        _collect_nodes(node.left, nodes_list)
+
+    # 递归访问右子树
+    if node.right: # 只有当右子节点存在时才递归
+        _collect_nodes(node.right, nodes_list)
+
+    # 如果是中序遍历，则 append(node) 会在左右递归调用之间。
+    # 如果是后序遍历，则 append(node) 会在左右递归调用之后。
+    # 前序遍历通常对于获取所有节点（包括根）是直接且方便的。
+
+def mutate_random_node(
+    original_node: Node,
+    # 以下参数用于生成新的替换子树 (通常是深度为一的树)
+    # 与 depth_one_trees 的参数保持一致
+    terminal_vals: List[str],
+    un_ops: List[str],
+    bin_ops: List[str],
+    ts_ops_list: List[str], # 避免与全局变量 ts_ops 名称冲突
+    ts_op_vals: List[str]
+) -> Node:
+    """
+    对给定的表达式树进行随机节点变异。
+
+    变异过程包括：
+    1. 深度复制原始树，以避免修改原树。
+    2. 从复制的树中随机选择一个节点。
+    3. 生成一个新的随机子树（通常是深度为一的树）。
+    4. 用新生成的子树替换选定节点的内容 (value, left, right)。
+       这意味着选中的节点本身被新子树的根节点所取代。
+
+    参数:
+        original_node (Node): 要进行变异的原始树的根节点。
+        terminal_vals (List[str]): 用于生成新子树的终端值列表。
+        un_ops (List[str]): 用于生成新子树的一元操作符列表。
+        bin_ops (List[str]): 用于生成新子树的二元操作符列表。
+        ts_ops_list (List[str]): 用于生成新子树的时间序列操作符列表。
+        ts_op_vals (List[str]): 用于生成新子树的时间序列操作参数值列表。
+
+    返回:
+        Node: 变异后产生的新树的根节点。
+    """
+    if not isinstance(original_node, Node):
+        # 或者可以尝试复制，但如果不是Node，复制也可能失败
+        raise TypeError("mutate_random_node 的 original_node 参数必须是一个 Node 对象。")
+
+    # 1. 深度复制原始树
+    copied_tree_root = copy_tree(original_node)
+    if copied_tree_root is None: # original_node 本身就是 None 的罕见情况
+        # 如果允许 original_node 为 None，则直接返回 None，或抛出错误
+        # 但函数签名指定 Node，所以理论上 original_node 不应为 None
+        # 为安全起见，如果 copy_tree 返回 None (例如 original_node.value 无效导致 Node 创建失败)
+        logger.error("mutate_random_node: 复制原始树失败，返回原始树的副本（可能为None）。")
+        return copied_tree_root # 或 raise
+
+    # 2. 收集复制树中的所有节点
+    nodes_in_copied_tree: List[Node] = []
+    _collect_nodes(copied_tree_root, nodes_in_copied_tree)
+
+    if not nodes_in_copied_tree:
+        # 这通常不应该发生，除非原始树是一个无效的空 Node 对象 (不是 None，而是例如 Node(None) 且无子节点)
+        logger.warning("mutate_random_node: 复制的树中没有收集到任何节点，返回原始树的副本。")
+        return copied_tree_root
+
+    # 3. 从节点列表中随机选择一个节点进行变异
+    node_to_mutate = random.choice(nodes_in_copied_tree)
+    # logger.debug(f"mutate_random_node: 选定进行变异的节点: {node_to_mutate!r}")
+
+    # 4. 生成一个新的随机子树（这里选择生成深度为一的树作为替换）
+    # 随机选择新子树的类型 (0:term, 1:unary, 2:binary, 3:ts_op)
+    new_subtree_flag = random.randint(0, 3)
+    try:
+        # 使用传入的参数列表来生成新的深度一的树
+        new_subtree_root = depth_one_trees(
+            terminal_vals, bin_ops, ts_ops_list, ts_op_vals, un_ops, new_subtree_flag
+        )
+    except ValueError as e:
+        # 如果 depth_one_trees 由于列表为空等原因失败，则创建一个简单的终端节点作为备用
+        logger.error(f"mutate_random_node: 生成新子树时出错 ({e})。将使用随机终端值作为备用。")
+        if not terminal_vals:
+            # 这种情况非常严重，无法生成备用终端
+            raise ValueError("mutate_random_node: 终端值列表 (terminal_vals) 为空，无法生成备用变异节点。") from e
+        new_subtree_root = Node(random.choice(terminal_vals))
+
+    # logger.debug(f"mutate_random_node: 生成的用于替换的新子树: {new_subtree_root!r}")
+
+    # 5. 用新生成的子树的属性替换选定节点的属性
+    # 这相当于将 node_to_mutate "变成" new_subtree_root
+    node_to_mutate.value = new_subtree_root.value
+    node_to_mutate.left = new_subtree_root.left
+    node_to_mutate.right = new_subtree_root.right
+
+    # logger.info(f"mutate_random_node: 节点已变异。变异后的树根: {copied_tree_root!r}")
+
+    # 兼容性检查：
+    # 当前的实现是替换整个节点（包括其子节点，如果新子树有的话）。
+    # `depth_one_trees` 生成的树本身是符合基本结构的。
+    # 例如，如果一个二元操作符被替换为一个终端，那么它原来的子节点就丢失了，
+    # 这是变异的一种形式（子树替换）。
+    # 如果要求更严格的“类型保持”变异（例如操作符只能替换为操作符），则需要更复杂的逻辑。
+    # 验收标准提到“变异后的树结构有效”，当前方式通过用一个有效的（深度一）子树替换来保证。
+
+    return copied_tree_root
+
+def crossover(parent1: Node, parent2: Node) -> tuple[Node, Node]:
+    """
+    对两个父表达式树进行交叉操作，生成两个子代树。
+
+    当前的实现是一个简化版本（基于任务DEV-011的代码片段提示）：
+    随机选择交换两个父树副本的直接左子节点或直接右子节点。
+    这并非通用的随机子树交叉，但为后续更复杂实现打下基础。
+
+    参数:
+        parent1 (Node): 第一个父树的根节点。
+        parent2 (Node): 第二个父树的根节点。
+
+    返回:
+        tuple[Node, Node]: 一个包含两个新生成的子代树根节点的元组 (child1, child2)。
+                           如果输入的父节点不适合进行此简化交叉（例如缺少子节点），
+                           则子代可能与父代相同或部分相同。
+    """
+    if not isinstance(parent1, Node) or not isinstance(parent2, Node):
+        raise TypeError("crossover 函数的 parent1 和 parent2 参数都必须是 Node 对象。")
+
+    # 1. 深度复制父树，生成子代树的初始版本
+    child1 = copy_tree(parent1)
+    child2 = copy_tree(parent2)
+
+    # 如果复制失败（例如原始父节点无效），或者父节点本身就是 None，则直接返回副本
+    if child1 is None or child2 is None:
+        logger.warning("crossover: 复制父节点失败或父节点为 None，返回原始副本。")
+        return child1, child2 # type: ignore # mypy 可能抱怨 None，但copy_tree处理了Optional
+
+    # 2. 实现简化版交叉：随机交换直接子节点
+    #    这种交叉方式非常依赖于树的顶层结构。
+    #    更通用的交叉会使用 _collect_nodes 选择任意子树。
+
+    # 确保两个子代树都有可以交换的子节点
+    # 为了简单起见，我们只考虑两层结构（根节点和其直接子节点）
+    # 随机决定是交换左子节点还是右子节点
+    if random.random() < 0.5: # 尝试交换左子节点
+        # 确保双方都有左子节点可以交换
+        if child1.left is not None and child2.left is not None:
+            logger.debug(f"交叉操作：交换 {child1.value} 的左子节点 ({child1.left.value if child1.left else 'None'}) "
+                         f"与 {child2.value} 的左子节点 ({child2.left.value if child2.left else 'None'})。")
+            temp_left_child = child1.left
+            child1.left = child2.left
+            child2.left = temp_left_child
+        else:
+            logger.info("交叉操作：尝试交换左子节点，但一个或两个子代缺少左子节点，未执行交换。")
+    else: # 尝试交换右子节点
+        # 确保双方都有右子节点可以交换
+        if child1.right is not None and child2.right is not None:
+            logger.debug(f"交叉操作：交换 {child1.value} 的右子节点 ({child1.right.value if child1.right else 'None'}) "
+                         f"与 {child2.value} 的右子节点 ({child2.right.value if child2.right else 'None'})。")
+            temp_right_child = child1.right
+            child1.right = child2.right
+            child2.right = temp_right_child
+        else:
+            logger.info("交叉操作：尝试交换右子节点，但一个或两个子代缺少右子节点，未执行交换。")
+
+    # 兼容性检查：
+    # 当前的简化交叉直接交换子树引用，不进行显式的类型或语义兼容性检查。
+    # 假设被交换的子树本身是有效的。
+    # 验收标准中“子树结构有效”主要依赖于 copy_tree 和被交换子树的原始有效性。
+    # “操作符不能替换为终端值”这类兼容性检查在更复杂的、节点级别值替换的变异或交叉中更突出。
+    # 对于子树交换，只要确保父节点仍然是合法的操作符即可。
+
+    # logger.info(f"crossover: 交叉完成。 Child1: {child1!r}, Child2: {child2!r}")
+    return child1, child2
+
+# ... (文件末尾) ...
+
 def depth_one_trees(
     terminal_vals: List[str],  # 参数名修改以避免与全局变量混淆，下同
     bin_ops: List[str],
