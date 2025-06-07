@@ -5,6 +5,9 @@ fastapi
 # [standard] 包含了 cython 编译的依赖，提供更好的性能。
 uvicorn[standard]
 
+# pandas: 强大的数据分析和操作库，用于处理表格数据 (如 DataFrame)。
+pandas
+
 # Redis: 用于与 Redis 数据库交互的 Python 客户端库。
 # Redis 将用作消息队列 (RQ) 和可能的缓存。
 redis

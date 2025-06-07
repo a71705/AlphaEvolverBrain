@@ -4,6 +4,8 @@ import time # 用于处理时间相关的操作，如 token 过期和重试间�
 import os # 用于访问环境变量，如 API 凭据
 import logging # 用于记录日志信息
 from datetime import datetime, timedelta # 用于处理 token 过期时间
+import pandas as pd # 用于数据处理，特别是将 API 响应转换为 DataFrame
+from functools import lru_cache # 用于实现方法调用的缓存机制
 
 # 获取当前模块的日志记录器实例
 logger = logging.getLogger(__name__)
@@ -26,6 +28,14 @@ MULTISIMULATION_PROGRESS_URL_TEMPLATE = f"{BRAIN_BASE_URL}/simulations/batch/{{j
 
 # 用户信息端点 (在 DEV-005 的测试代码中用到，实际应用中可能不需要或不同)
 USER_ME_URL = f"{BRAIN_BASE_URL}/users/me"
+
+# 数据集和数据字段相关的端点
+# DATASETS_URL: 获取可用数据集列表的端点。
+DATASETS_URL = f"{BRAIN_BASE_URL}/datasets" # 假设的端点路径
+
+# DATAFIELDS_URL: 获取可用数据字段列表的端点。
+# 此端点可能支持多种查询参数进行筛选和分页。
+DATAFIELDS_URL = f"{BRAIN_BASE_URL}/datafields" # 假设的端点路径
 
 class BrainApiSession:
     """
@@ -440,8 +450,177 @@ class BrainApiSession:
 
             time.sleep(polling_interval)
 
+    @lru_cache(maxsize=1) # 缓存最近一次调用的结果 (基于参数组合)
+    def get_datasets(self, instrument_type: str = 'EQUITY', region: str = 'USA', delay: int = 1, universe: str = 'TOP3000') -> pd.DataFrame:
+        """
+        获取指定条件下的可用数据集列表，并缓存结果。
+
+        参数:
+            instrument_type (str): 资产类型 (例如 'EQUITY', 'FUTURES')。默认为 'EQUITY'。
+            region (str): 地区 (例如 'USA', 'CHN', 'GLOBAL')。默认为 'USA'。
+            delay (int): 数据延迟 (例如 1 代表日频延迟为1的数据)。默认为 1。
+            universe (str): 资产池 (例如 'TOP3000', 'RUSSELL1000')。默认为 'TOP3000'。
+
+        返回:
+            pd.DataFrame: 包含数据集信息的 Pandas DataFrame。
+                          如果获取失败或无数据，则返回空的 DataFrame。
+                          DataFrame 的列结构取决于 API 返回的数据。
+        """
+        logger.info(
+            f"开始获取数据集列表: instrument_type='{instrument_type}', region='{region}', delay={delay}, universe='{universe}'"
+        )
+        # 构建请求参数字典
+        params = {
+            "instrument_type": instrument_type,
+            "region": region,
+            "delay": delay,
+            "universe": universe
+            # API 可能需要其他参数，例如 'page', 'limit'，如果数据集列表也支持分页
+            # 但通常数据集列表较短，可能不分页，或 lru_cache(maxsize=1) 暗示我们期望一次获取全部
+        }
+
+        try:
+            # 使用 _request_with_retry 方法发送 GET 请求
+            response = self._request_with_retry("GET", DATASETS_URL, params=params, timeout=20)
+
+            # 假设 API 成功时返回一个 JSON 列表，其中每个对象是一个数据集的信息
+            datasets_list = response.json() # 直接获取整个列表，如果API返回结构是 {"results": [...]} 则需调整为 response.json().get("results", [])
+
+            if not datasets_list:
+                logger.info("未找到满足条件的数据集，或 API 返回空列表。")
+                return pd.DataFrame() # 返回空的 DataFrame
+
+            # 将数据集列表转换为 Pandas DataFrame
+            df_datasets = pd.DataFrame(datasets_list)
+            logger.info(f"成功获取并转换了 {len(df_datasets)} 个数据集到 DataFrame。")
+            return df_datasets
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"获取数据集列表时发生请求错误: {e}")
+            return pd.DataFrame() # 返回空的 DataFrame
+        except ValueError as e: # JSON 解析错误
+            logger.error(f"解析数据集列表响应时发生错误: {e}。响应内容: {response.text if 'response' in locals() else 'N/A'}")
+            return pd.DataFrame()
+        except Exception as e:
+            logger.error(f"获取数据集列表时发生未预料的错误: {e}", exc_info=True)
+            return pd.DataFrame()
+
+    @lru_cache(maxsize=128) # 缓存最近128次不同参数组合调用的结果
+    def get_datafields(self, instrument_type: str = 'EQUITY', region: str = 'USA', delay: int = 1,
+                       universe: str = 'TOP3000', dataset_id: str = '', search: str = '',
+                       page_size: int = 100) -> pd.DataFrame: # page_size 是我们定义的单次请求量
+        """
+        获取指定条件下的可用数据字段列表，支持分页，并缓存结果。
+
+        参数:
+            instrument_type (str): 资产类型。默认为 'EQUITY'。
+            region (str): 地区。默认为 'USA'。
+            delay (int): 数据延迟。默认为 1。
+            universe (str): 资产池。默认为 'TOP3000'。
+            dataset_id (str): 特定数据集的 ID (可选)。默认为空字符串。
+            search (str): 搜索关键词 (可选, 用于筛选字段名称或描述)。默认为空字符串。
+            page_size (int): 每次 API 请求获取的条目数量（如果 API 支持自定义分页大小）。
+                             注意：API 可能有其自身的最大分页限制。此参数用于控制我方请求。
+
+        返回:
+            pd.DataFrame: 包含数据字段信息的 Pandas DataFrame。
+                          如果获取失败或无数据，则返回空的 DataFrame。
+        """
+        logger.info(
+            f"开始获取数据字段列表: instrument_type='{instrument_type}', region='{region}', delay={delay}, "
+            f"universe='{universe}', dataset_id='{dataset_id}', search='{search}'"
+        )
+
+        all_datafields_list = [] # 用于存储所有分页获取到的数据字段
+        current_page = 1 # API 分页通常从1开始，或者使用 offset
+
+        # 构建基础请求参数字典，不包含分页参数
+        base_params = {
+            "instrument_type": instrument_type,
+            "region": region,
+            "delay": delay,
+            "universe": universe,
+        }
+        if dataset_id: # 如果提供了 dataset_id，则添加到参数中
+            base_params["dataset_id"] = dataset_id
+        if search: # 如果提供了 search 关键词，则添加到参数中
+            base_params["search"] = search
+
+        while True:
+            # 每次循环时，复制基础参数并添加当前页的分页参数
+            params = base_params.copy()
+            # API 可能使用 'page' 和 'page_size'/'limit', 或者 'offset' 和 'limit'
+            # 此处假设使用 'page' 和 'limit' (或 'page_size')
+            params["page"] = current_page
+            params["limit"] = page_size # 告知 API 我们期望每页获取多少条
+
+            logger.debug(f"正在获取数据字段第 {current_page} 页，参数: {params}")
+
+            try:
+                response = self._request_with_retry("GET", DATAFIELDS_URL, params=params, timeout=20)
+                response_data = response.json()
+
+                # 从响应中提取当前页的数据字段列表和总数信息
+                # API 响应结构可能不同，常见的有:
+                # 1. {"results": [...], "count": total_items, "next": "next_page_url", "previous": "..."}
+                # 2. {"data": [...], "total": total_items, "page": current, "last_page": ...}
+                # 此处假设第一种结构
+                current_page_items = response_data.get("results", [])
+                total_items = response_data.get("count") # 可选，用于日志或提前判断
+                next_page_url = response_data.get("next") # 是否有下一页的直接链接
+
+                if not current_page_items: # 如果当前页没有数据
+                    if current_page == 1: # 如果是第一页就没有数据
+                        logger.info("未找到满足条件的数据字段，或 API 返回空列表。")
+                    else: # 如果不是第一页，说明已经取完了所有数据
+                        logger.info(f"已获取所有数据字段，总共 {len(all_datafields_list)} 条。")
+                    break # 退出循环
+
+                all_datafields_list.extend(current_page_items)
+                logger.info(f"已获取 {len(current_page_items)} 条数据字段 (第 {current_page} 页)。累计: {len(all_datafields_list)} 条。")
+
+                # 判断是否还有下一页
+                if next_page_url: # 如果 API 直接提供了下一页的 URL
+                    current_page += 1 # 准备请求下一页
+                elif total_items is not None: # 如果 API 提供了总数
+                    if len(all_datafields_list) >= total_items:
+                        logger.info(f"已获取所有 {total_items} 条数据字段。")
+                        break # 已获取全部数据
+                    else:
+                        current_page += 1 # 准备请求下一页
+                else: # 如果既没有 next_page_url 也没有 total_items，且当前页有数据，则只能假设还有下一页
+                      # 这是一种不太理想的 API 设计，但需要处理。或者，如果当前页数据少于 page_size，也可认为结束。
+                    if len(current_page_items) < page_size:
+                        logger.info(f"当前页获取的数据条数 ({len(current_page_items)}) 小于请求的页面大小 ({page_size})，认为已获取所有数据。")
+                        break
+                    else:
+                        current_page += 1
+
+                # 防止无限循环的额外检查 (例如，如果API分页逻辑有问题)
+                if current_page > 500: # 假设最多500页，避免意外的无限循环
+                    logger.warning("获取数据字段时，页数超过500页，可能存在问题，停止获取。")
+                    break
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"获取数据字段列表 (第 {current_page} 页) 时发生请求错误: {e}")
+                # 发生错误时，可以选择返回已获取的部分数据，或者返回空 DataFrame
+                return pd.DataFrame(all_datafields_list) if all_datafields_list else pd.DataFrame()
+            except ValueError as e: # JSON 解析错误
+                logger.error(f"解析数据字段列表响应 (第 {current_page} 页) 时发生错误: {e}。响应内容: {response.text if 'response' in locals() else 'N/A'}")
+                return pd.DataFrame(all_datafields_list) if all_datafields_list else pd.DataFrame()
+            except Exception as e:
+                logger.error(f"获取数据字段列表 (第 {current_page} 页) 时发生未预料的错误: {e}", exc_info=True)
+                return pd.DataFrame(all_datafields_list) if all_datafields_list else pd.DataFrame()
+
+        if not all_datafields_list:
+            return pd.DataFrame() # 如果最终列表为空，返回空 DataFrame
+
+        # 将所有获取到的数据字段列表转换为 Pandas DataFrame
+        df_datafields = pd.DataFrame(all_datafields_list)
+        logger.info(f"成功获取并转换了总共 {len(df_datafields)} 个数据字段到 DataFrame。")
+        return df_datafields
+
     # === 后续任务中将添加其他与 Brain API 交互的方法 ===
-    # 例如: get_datasets, get_datafields 等
     # 这些方法都应该使用 self._request_with_retry 来执行实际的 API 调用
 
 # 示例用法 (用于基本测试，实际测试应使用单元测试框架)

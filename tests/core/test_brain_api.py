@@ -16,8 +16,11 @@ from app.core.brain_api import (
     TOKEN_URL,
     SIMULATIONS_URL,
     SIMULATION_PROGRESS_URL_TEMPLATE,
-    MULTISIMULATION_PROGRESS_URL_TEMPLATE
+    MULTISIMULATION_PROGRESS_URL_TEMPLATE,
+    DATASETS_URL, # 新增导入
+    DATAFIELDS_URL # 新增导入
 )
+import pandas as pd # 新增导入
 
 # 定义一个测试类，继承自 unittest.TestCase。
 class TestBrainApiSession(unittest.TestCase):
@@ -399,6 +402,167 @@ class TestBrainApiSession(unittest.TestCase):
 
     # 可以为 multisimulation_progress 添加 FAILED 和 TIMEOUT 的测试，类似于 simulation_progress
     # 这里省略以保持简洁，但实际项目中应覆盖这些场景
+
+    # --- 测试 get_datasets ---
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    def test_get_datasets_success_and_cached(self, mock_request_with_retry):
+        """测试 get_datasets 成功获取数据并验证缓存机制。"""
+        mock_response_data = [
+            {"id": "d1", "name": "Dataset1", "description": "First dataset"},
+            {"id": "d2", "name": "Dataset2", "description": "Second dataset"}
+        ]
+        mock_response = mock.MagicMock(spec=requests.Response)
+        mock_response.json.return_value = mock_response_data
+        mock_request_with_retry.return_value = mock_response
+
+        # 第一次调用
+        df1 = self.session.get_datasets(instrument_type='EQUITY_TEST', region='USA_TEST')
+
+        # 验证 DataFrame 内容
+        self.assertIsInstance(df1, pd.DataFrame)
+        self.assertEqual(len(df1), 2)
+        self.assertEqual(df1.iloc[0]['name'], "Dataset1")
+        mock_request_with_retry.assert_called_once_with(
+            "GET",
+            DATASETS_URL,
+            params={'instrument_type': 'EQUITY_TEST', 'region': 'USA_TEST', 'delay': 1, 'universe': 'TOP3000'},
+            timeout=20
+        )
+
+        # 第二次调用使用相同参数
+        df2 = self.session.get_datasets(instrument_type='EQUITY_TEST', region='USA_TEST')
+        self.assertTrue(df1.equals(df2)) # 确保返回的 DataFrame 相同
+        # _request_with_retry 应该仍然只被调用了一次，因为结果被缓存了
+        mock_request_with_retry.assert_called_once()
+
+        # 第三次调用使用不同参数，应该再次调用 API
+        mock_response_data_new = [{"id": "d3", "name": "Dataset3"}]
+        mock_response_new = mock.MagicMock(spec=requests.Response)
+        mock_response_new.json.return_value = mock_response_data_new
+        # 重设 mock，以便side_effect或return_value可以根据新的调用生效
+        # 或者让 mock_request_with_retry 的 return_value 在这里被重新赋值
+        mock_request_with_retry.return_value = mock_response_new
+        df3 = self.session.get_datasets(instrument_type='FUTURES_TEST', region='GLOBAL_TEST')
+        self.assertEqual(len(df3), 1)
+        self.assertEqual(df3.iloc[0]['name'], "Dataset3")
+        # 验证 _request_with_retry 被调用了两次 (一次为旧参数，一次为新参数)
+        self.assertEqual(mock_request_with_retry.call_count, 2)
+
+        # 清除特定方法的缓存以进行后续测试（如果需要）
+        self.session.get_datasets.cache_clear()
+
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    def test_get_datasets_api_error(self, mock_request_with_retry):
+        """测试 get_datasets 在 API 请求失败时返回空 DataFrame。"""
+        mock_request_with_retry.side_effect = requests.exceptions.RequestException("API Unreachable")
+
+        df = self.session.get_datasets()
+
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertTrue(df.empty)
+        mock_request_with_retry.assert_called_once()
+        self.session.get_datasets.cache_clear()
+
+
+    # --- 测试 get_datafields ---
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    def test_get_datafields_single_page_success_and_cached(self, mock_request_with_retry):
+        """测试 get_datafields 成功获取单页数据并验证缓存。"""
+        mock_response_data = {
+            "results": [
+                {"id": "f1", "name": "Field1", "dataType": "double"},
+                {"id": "f2", "name": "Field2", "dataType": "long"}
+            ],
+            "count": 2, # 总共有2条记录
+            "next": None # 没有下一页
+        }
+        mock_response = mock.MagicMock(spec=requests.Response)
+        mock_response.json.return_value = mock_response_data
+        mock_request_with_retry.return_value = mock_response
+
+        # 第一次调用
+        df1 = self.session.get_datafields(search='TestField', page_size=5)
+
+        self.assertIsInstance(df1, pd.DataFrame)
+        self.assertEqual(len(df1), 2)
+        self.assertEqual(df1.iloc[0]['name'], "Field1")
+        expected_params = {
+            'instrument_type': 'EQUITY', 'region': 'USA', 'delay': 1, 'universe': 'TOP3000',
+            'dataset_id': '', 'search': 'TestField', 'page': 1, 'limit': 5
+        }
+        mock_request_with_retry.assert_called_once_with("GET", DATAFIELDS_URL, params=expected_params, timeout=20)
+
+        # 第二次调用相同参数
+        df2 = self.session.get_datafields(search='TestField', page_size=5)
+        self.assertTrue(df1.equals(df2))
+        mock_request_with_retry.assert_called_once() # 缓存命中
+
+        self.session.get_datafields.cache_clear()
+
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    def test_get_datafields_multiple_pages_success(self, mock_request_with_retry):
+        """测试 get_datafields 成功获取多页数据。"""
+        # 模拟第一页响应
+        mock_response_page1_data = {
+            "results": [{"id": f"f{i}", "name": f"Field{i}"} for i in range(2)], # page_size=2
+            "count": 3, # 总共有3条记录
+            "next": "url_to_page_2" # 有下一页
+        }
+        mock_response_page1 = mock.MagicMock(spec=requests.Response)
+        mock_response_page1.json.return_value = mock_response_page1_data
+
+        # 模拟第二页响应
+        mock_response_page2_data = {
+            "results": [{"id": "f2", "name": "Field2_page2"}], # 只有1条记录了
+            "count": 3,
+            "next": None # 没有下一页了
+        }
+        mock_response_page2 = mock.MagicMock(spec=requests.Response)
+        mock_response_page2.json.return_value = mock_response_page2_data
+
+        # 让 _request_with_retry 按顺序返回这两个响应
+        mock_request_with_retry.side_effect = [mock_response_page1, mock_response_page2]
+
+        df = self.session.get_datafields(page_size=2) # page_size 在这里用于我们内部的 limit 参数
+
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertEqual(len(df), 3) # 总共获取了 0, 1, 2 -> 3条记录
+        self.assertEqual(df.iloc[0]['name'], "Field0")
+        self.assertEqual(df.iloc[2]['name'], "Field2_page2")
+
+        # 验证 _request_with_retry 被调用了两次
+        self.assertEqual(mock_request_with_retry.call_count, 2)
+        # 验证第一次调用的参数
+        expected_params_page1 = {
+            'instrument_type': 'EQUITY', 'region': 'USA', 'delay': 1, 'universe': 'TOP3000',
+            'dataset_id': '', 'search': '', 'page': 1, 'limit': 2
+        }
+        # 验证第二次调用的参数 (page=2)
+        expected_params_page2 = {
+            'instrument_type': 'EQUITY', 'region': 'USA', 'delay': 1, 'universe': 'TOP3000',
+            'dataset_id': '', 'search': '', 'page': 2, 'limit': 2
+        }
+        mock_request_with_retry.assert_any_call("GET", DATAFIELDS_URL, params=expected_params_page1, timeout=20)
+        mock_request_with_retry.assert_any_call("GET", DATAFIELDS_URL, params=expected_params_page2, timeout=20)
+
+        self.session.get_datafields.cache_clear()
+
+    @mock.patch.object(BrainApiSession, '_request_with_retry')
+    def test_get_datafields_empty_result(self, mock_request_with_retry):
+        """测试 get_datafields 在 API 返回空结果时的情况。"""
+        mock_response_data = {"results": [], "count": 0, "next": None}
+        mock_response = mock.MagicMock(spec=requests.Response)
+        mock_response.json.return_value = mock_response_data
+        mock_request_with_retry.return_value = mock_response
+
+        df = self.session.get_datafields()
+
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertTrue(df.empty)
+        mock_request_with_retry.assert_called_once()
+        self.session.get_datafields.cache_clear()
 
     @mock.patch('app.core.brain_api.time.time')
     @mock.patch('app.core.brain_api.time.sleep', return_value=None)
