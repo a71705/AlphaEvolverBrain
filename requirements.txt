@@ -10,3 +10,5 @@ uvicorn[standard]
 redis
 rq
 python-dotenv
+# Pandas:强大的数据分析和处理库，用于将API获取的数据转换为DataFrame
+pandas
