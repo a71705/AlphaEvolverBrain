@@ -16,12 +16,11 @@ from .alphas import router as alphas_router
 # 从同级目录下的 data_sources.py 文件中导入数据源元数据相关的路由。
 from .data_sources import router as data_sources_router
 
-# 导入其他未来可能存在的v1版本的路由模块的占位符（将被后续任务填充）
-# from .experiments import router as experiments_router
-# from .alphas import router as alphas_router
-# from .data_sources import router as data_sources_router
-# from .utils import router as utils_router
-# from .status import router as status_router
+# 从同级目录下的 utils.py 文件中导入工具类相关的路由 (DEV-027 新增)
+from .utils import router as utils_router
+
+# 从同级目录下的 status.py 文件中导入状态与监控相关的路由 (DEV-028 新增)
+from .status import router as status_router
 
 # 创建一个 APIRouter 实例，用于聚合所有 /api/v1 下的特定模块路由。
 # 这个实例将被 app/main.py 导入并使用（在 main.py 中它被命名为 api_router）。
@@ -43,13 +42,11 @@ api_router.include_router(alphas_router) # prefix="/alphas" 已在 alphas_router
 # 将数据源元数据路由包含到 v1 的主路由器中。
 api_router.include_router(data_sources_router) # prefix="/data_sources" 已在 data_sources_router 内部定义
 
+# 将工具类路由包含到 v1 的主路由器中 (DEV-027 新增)
+api_router.include_router(utils_router, prefix="/utils", tags=["Utilities - Alpha 工具"])
 
-# 占位符注释：后续其他API模块的路由将在这里添加
-# 例如：
-# api_router.include_router(experiments_router) # experiments_router 自身也应有 prefix 和 tags
-# api_router.include_router(alphas_router)
-# api_router.include_router(data_sources_router)
-# api_router.include_router(utils_router)
-# api_router.include_router(status_router)
+# 将状态与监控路由包含到 v1 的主路由器中 (DEV-028 新增)
+api_router.include_router(status_router, prefix="/status", tags=["Status & Monitoring - 状态与监控"])
+
 
 # 此文件定义并导出了 api_router，供 app/main.py 使用。

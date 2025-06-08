@@ -4,6 +4,7 @@ import LoginView from '../views/LoginView.vue';
 import HomeView from '../views/HomeView.vue';
 // ExperimentListView.vue is now lazy-loaded, so explicit import is not needed here.
 // import ExperimentListView from '../views/ExperimentListView.vue';
+import ExperimentDetailView from '../views/ExperimentDetailView.vue'; // 导入新视图
 
 const routes = [
   {
@@ -29,6 +30,12 @@ const routes = [
     // 在 DEV-022 中我们使用了动态导入，这里保持一致
     component: () => import(/* webpackChunkName: "experiments" */ '../views/ExperimentListView.vue'),
     meta: { requiresAuth: true } // 确保此路由需要认证
+  },
+  { // 新增实验详情页路由
+    path: '/experiments/:experimentId', // 使用动态路由参数
+    name: 'experiment-detail',
+    component: ExperimentDetailView, // 指向新创建的视图组件
+    meta: { requiresAuth: true } // 需要认证才能访问
   }
   // ... 其他路由
 ];

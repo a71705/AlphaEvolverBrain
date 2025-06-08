@@ -1,290 +1,211 @@
-# 导入 Pydantic 的 BaseModel，用于定义数据模型 (模式)。
-from pydantic import BaseModel, EmailStr, Field
-# 导入 datetime 用于 AuthResponse 中的 expires_at 字段。
-from datetime import datetime
-# 导入 Optional 用于可选字段 (如果未来需要)。
-from typing import Optional, Dict, Any # 用于 config_json 的类型提示
+# app/schemas.py
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, validator
+import datetime # 确保导入 datetime
+import uuid # 用于 Alpha ID
 
-# --- 请求模型 (Request Models) ---
+# --- 枚举类型 (保持与 models.py 一致或根据需要定义) ---
+# class ExperimentStatusEnum(str, Enum):
+#     PENDING = "PENDING"
+#     RUNNING = "RUNNING"
+#     COMPLETED = "COMPLETED"
+#     FAILED = "FAILED"
+#     CANCELLED = "CANCELLED"
 
-class LoginRequest(BaseModel):
-    """
-    用户登录请求体模型。
-    用于 FastAPI 端点验证进入的登录数据。
-    """
-    # 电子邮箱地址，使用 EmailStr 类型进行基本格式验证。
-    email: EmailStr = Field(..., description="用户的注册电子邮箱地址。")
-    # 用户密码，字符串类型。
-    password: str = Field(..., min_length=1, description="用户的登录密码。") # min_length=1 确保密码不为空
+# --- Alpha 相关的 Schema ---
+class AlphaBase(BaseModel):
+    """Alpha 的基础模型，包含通用字段"""
+    expression: str = Field(..., description="Alpha表达式的字符串表示")
+    description: Optional[str] = Field(None, description="Alpha的描述信息")
+    # 基础模型中不包含与数据库或特定请求/响应相关的字段
 
-    # Pydantic 模型配置示例 (可选)
-    class Config:
-        # schema_extra 用于在 OpenAPI/Swagger 文档中提供示例数据
-        schema_extra = {
-            "example": {
-                "email": "user@example.com",
-                "password": "securepassword123"
-            }
-        }
-
-
-# --- 响应模型 (Response Models) ---
-
-class AuthResponse(BaseModel):
-    """
-    认证成功后的响应体模型。
-    包含发给客户端的会话令牌和其过期时间。
-    """
-    # 会话令牌，通常是一个唯一字符串 (例如 UUID)。
-    session_token: str = Field(..., description="生成的会话令牌。")
-    # 令牌的过期时间戳 (UTC)。
-    expires_at: datetime = Field(..., description="会话令牌的过期 UTC 时间。")
-    # （可选）可以添加 token_type，例如 "bearer"，如果遵循 OAuth2 风格。
-    # token_type: str = Field("bearer", description="令牌类型，通常为 'bearer'。")
-
-    class Config:
-        schema_extra = {
-            "example": {
-                "session_token": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
-                "expires_at": "2023-12-31T23:59:59.000Z"
-                # "token_type": "bearer"
-            }
-        }
-
-# 后续其他任务可能会在此文件中添加更多的 Pydantic 模型，
-# 例如用于 Experiment 或 Alpha 数据的创建和响应。
-
-# --- 实验相关的 Pydantic 模型 ---
-
-class ExperimentCreate(BaseModel):
-    """
-    创建新实验时使用的请求体模型。
-    """
-    name: str = Field(..., min_length=1, max_length=100, description="实验的名称，必填项，长度限制1-100字符。")
-    description: Optional[str] = Field(None, max_length=500, description="实验的详细描述，可选，最大长度500字符。")
-    # config_json 用于存储遗传算法的配置，例如种群大小、迭代次数、变异率等。
-    # 使用 Dict[str, Any] 表示它是一个灵活的JSON对象。
-    config_json: Dict[str, Any] = Field(..., description="遗传算法的配置参数，以JSON对象形式提供。")
-    code_version: Optional[str] = Field(None, max_length=64, description="可选，执行此次实验的代码版本号，例如Git提交哈希。")
+class AlphaCreate(AlphaBase):
+    """用于创建新 Alpha 的模型"""
+    # experiment_id: str # 在创建时通常需要关联到一个实验
+    # 在API层面，experiment_id 可以从路径参数获取，或者包含在请求体中
+    # 如果 experiment_id 在请求体中，则应在此处定义
+    # 模拟设置也应该在这里定义，如果它们在创建Alpha时就已确定
+    simulation_settings_json: Optional[Dict[str, Any]] = Field(None, description="Alpha的模拟回测设置 (JSON格式)")
+    # ga_config_json: Optional[Dict[str, Any]] = Field(None, description="生成此Alpha的遗传算法配置 (JSON格式)")
 
 
-    class Config:
-        schema_extra = {
-            "example": {
-                "name": "我的第一个Alpha实验",
-                "description": "测试基础参数下的遗传算法表现。",
-                "config_json": {
-                    "population_size": 100,
-                    "generations": 50,
-                    "mutation_rate": 0.05,
-                    "crossover_rate": 0.7,
-                    "max_depth": 3,
-                    "simulation_settings": {"universe": "TOP3000", "delay": 1, "region": "USA"}
-                },
-                "code_version": "abcdef1234567890"
-            }
-        }
-
-class ExperimentResponse(BaseModel):
-    """
-    用于API响应的实验数据模型。
-    包含了实验在数据库中的主要信息，以及一些动态获取的状态。
-    """
-    id: int = Field(..., description="实验的唯一标识符。")
-    name: str = Field(..., description="实验的名称。")
-    description: Optional[str] = Field(None, description="实验的详细描述。")
-    start_time: Optional[datetime] = Field(None, description="实验开始的UTC时间。") # 改为Optional，因为刚创建时可能还没有实际开始时间
-    end_time: Optional[datetime] = Field(None, description="实验结束的UTC时间（如果已结束）。")
-    status: str = Field(..., description="实验当前状态 (例如 PENDING, RUNNING, COMPLETED, FAILED)。")
-    config_json: Dict[str, Any] = Field(..., description="实验的配置参数。")
-    code_version: Optional[str] = Field(None, description="执行实验时的代码版本。")
-    current_depth: int = Field(..., description="遗传算法当前进行到的深度级别。")
-    current_iteration: int = Field(..., description="在当前深度下，遗传算法已完成的迭代次数。")
-    random_seed: Optional[int] = Field(None, description="用于实验的随机数种子。")
-    error_message: Optional[str] = Field(None, description="如果实验失败，记录的错误信息。")
-
-    # 动态获取或计算的字段
-    job_id: Optional[str] = Field(None, description="关联的RQ作业ID（如果任务已提交）。")
-    job_status: Optional[str] = Field(None, description="关联的RQ作业的当前状态。")
-    progress_percentage: Optional[float] = Field(None, ge=0, le=100, description="实验的估算完成进度百分比（0-100）。")
-
-    class Config:
-        orm_mode = True # 允许模型从ORM对象（如SQLAlchemy模型实例）中读取数据。
-        schema_extra = {
-            "example": {
-                "id": 1,
-                "name": "我的第一个Alpha实验",
-                "description": "测试基础参数下的遗传算法表现。",
-                "start_time": "2023-01-01T10:00:00Z",
-                "end_time": None,
-                "status": "RUNNING",
-                "config_json": {"population_size": 100, "generations": 50},
-                "code_version": "abcdef1234567890",
-                "current_depth": 1,
-                "current_iteration": 5,
-                "random_seed": 12345,
-                "error_message": None,
-                "job_id": "exp_1",
-                "job_status": "started", # RQ作业状态示例
-                "progress_percentage": 25.5
-            }
-        }
-
-# ... (其他已有的或未来的 Pydantic 模型) ...
-
-# --- 数据源元数据相关的 Pydantic 模型 ---
-
-class DataSetResponse(BaseModel):
-    """
-    用于API响应的单个数据集的元数据模型。
-    字段应对应 BrainApiSession.get_datasets() 返回的DataFrame的列。
-    注意：确切的字段名和类型取决于实际的WorldQuant Brain API响应。以下为常见示例。
-    """
-    # 假设数据集有以下字段 (需要根据实际API调整)
-    id: str = Field(..., description="数据集的唯一标识符。")
-    name: str = Field(..., description="数据集的名称。")
-    description: Optional[str] = Field(None, description="数据集的描述。")
-    category: Optional[str] = Field(None, description="数据集的分类。")
-    instrument_type: Optional[str] = Field(None, description="适用的资产类型，例如 EQUITY, FUTURES。")
-    region: Optional[str] = Field(None, description="适用的地区，例如 USA, CHN, GLOBAL。")
-    # delay: Optional[int] = Field(None, description="数据的延迟天数。") # get_datasets 的参数，不一定在返回对象中
-    # universe: Optional[str] = Field(None, description="适用的资产池。") # 同上
-    # 其他可能的字段: created_at, updated_at, data_provider, etc.
-    source: Optional[str] = Field(None, description="数据来源或提供商。")
-    data_frequency: Optional[str] = Field(None, description="数据频率，例如 DAILY, INTRADAY。")
-
-
-    class Config:
-        orm_mode = False # 因为数据通常是从DataFrame的to_dict转换而来，而非直接ORM对象
-        schema_extra = {
-            "example": {
-                "id": "equity_usa_daily_am_101",
-                "name": "美国股票日行情数据",
-                "description": "包含美国股票市场的每日开高低收价格和成交量等。",
-                "category": "行情数据",
-                "instrument_type": "EQUITY",
-                "region": "USA",
-                "source": "Exchange",
-                "data_frequency": "DAILY"
-            }
-        }
-
-
-class DataFieldResponse(BaseModel):
-    """
-    用于API响应的单个数据字段的元数据模型。
-    字段应对应 BrainApiSession.get_datafields() 返回的DataFrame的列。
-    注意：确切的字段名和类型取决于实际的WorldQuant Brain API响应。以下为常见示例。
-    """
-    # 假设数据字段有以下字段 (需要根据实际API调整)
-    id: str = Field(..., description="数据字段的唯一标识符（例如 'close', 'adv20'）。")
-    name: str = Field(..., description="数据字段的显示名称或标签。")
-    description: Optional[str] = Field(None, description="数据字段的详细描述。")
-    data_type: Optional[str] = Field(None, alias="dataType", description="数据字段的数据类型 (例如 'double', 'long', 'string', 'boolean')。API可能用驼峰命名。")
-    dataset_id: Optional[str] = Field(None, alias="datasetId", description="该字段所属的数据集的ID (如果适用)。")
-    category: Optional[str] = Field(None, description="数据字段的分类 (例如 '价格', '成交量', '技术指标')。")
-    # expression: Optional[str] = Field(None, description="如果该字段是衍生字段，其计算表达式。") # 某些API可能有
-
-    class Config:
-        orm_mode = False # 从DataFrame的to_dict转换
-        allow_population_by_field_name = True # 允许使用字段名或别名 (如 dataType) 进行填充
-        schema_extra = {
-            "example": {
-                "id": "close_price",
-                "name": "收盘价",
-                "description": "资产在交易日结束时的最后成交价格。",
-                "dataType": "double", # 注意别名 dataType
-                "datasetId": "equity_usa_daily_am_101",
-                "category": "价格数据"
-            }
-        }
-
-# ... (其他已有的或未来的 Pydantic 模型) ...
-
-# --- Alpha 相关的 Pydantic 模型 ---
-
-class AlphaBase(BaseModel): # 创建一个基础Alpha模型，包含通用字段
-    """
-    Alpha 模型的基础字段，可被其他 Alpha 相关响应模型继承。
-    """
-    id: int = Field(..., description="Alpha的唯一标识符。")
-    experiment_id: int = Field(..., description="此Alpha所属实验的ID。")
-    expression: str = Field(..., description="Alpha的表达式字符串。")
-    depth: Optional[int] = Field(None, description="生成此Alpha的树的深度。") # 改为Optional以适应可能的未知情况
-    iteration: Optional[int] = Field(None, description="Alpha在遗传算法的第几次迭代中产生。") # 同上
-    calculated_fitness_score: Optional[float] = Field(None, description="计算得出的适应度得分。")
-    simulated_at: Optional[datetime] = Field(None, description="Alpha模拟完成的UTC时间。")
-    error_message: Optional[str] = Field(None, description="如果Alpha模拟或处理失败，记录的错误信息。")
-
-    class Config:
-        orm_mode = True # 允许从ORM对象读取数据
-
+class AlphaUpdate(BaseModel):
+    """用于更新现有 Alpha 的模型 (部分更新)"""
+    expression: Optional[str] = Field(None, description="Alpha表达式的字符串表示")
+    description: Optional[str] = Field(None, description="Alpha的描述信息")
+    is_active: Optional[bool] = Field(None, description="标记Alpha是否为活跃/选中状态")
+    # 模拟结果字段通常不由用户直接更新，而是通过模拟流程更新
+    # simulation_settings_json: Optional[Dict[str, Any]] = None # 如果允许更新模拟设置
 
 class AlphaResponse(AlphaBase):
-    """
-    用于API响应（例如列表视图）的Alpha简要信息模型。
-    继承自 AlphaBase。
-    """
-    # AlphaResponse 可以直接使用 AlphaBase 的所有字段。
-    # 如果列表视图需要额外字段，可以在这里添加。
-    # 例如，如果需要快速知道是否是历史最佳：
-    is_history_best: Optional[bool] = Field(None, description="标记此Alpha是否曾是历史最优之一。")
+    """用于API响应的Alpha模型，包含数据库中的ID和其他生成字段"""
+    id: uuid.UUID = Field(..., description="Alpha在数据库中的唯一ID")
+    experiment_id: Optional[uuid.UUID] = Field(None, description="关联的实验ID (如果存在)") # 改为 UUID
+    created_at: datetime.datetime = Field(..., description="Alpha创建时间戳")
+    updated_at: datetime.datetime = Field(..., description="Alpha最后更新时间戳")
+
+    # 模拟结果相关字段 (与 Alpha 模型中的 JSON 字段对应)
+    simulation_settings_json: Optional[Dict[str, Any]] = Field(None, description="Alpha的模拟回测设置")
+    is_stats_json: Optional[Dict[str, Any]] = Field(None, description="样本内统计数据 (IS)")
+    is_tests_json: Optional[Dict[str, Any]] = Field(None, description="样本内测试结果 (IS)")
+    oos_stats_json: Optional[Dict[str, Any]] = Field(None, description="样本外统计数据 (OOS)") # (如果适用)
+    oos_tests_json: Optional[Dict[str, Any]] = Field(None, description="样本外测试结果 (OOS)") # (如果适用)
+
+    pnl_data_json: Optional[Dict[str, Any]] = Field(None, description="PNL数据 (例如每日收益)")
+    yearly_stats_data_json: Optional[Dict[str, Any]] = Field(None, description="年度统计数据")
+
+    fitness_score: Optional[float] = Field(None, description="Alpha的适应度评分 (如果通过GA生成)")
+    simulated_at: Optional[datetime.datetime] = Field(None, description="上次成功模拟的时间戳")
+    simulation_status: Optional[str] = Field(None, description="当前或最后一次模拟的状态") # 例如 PENDING, RUNNING, COMPLETED, FAILED
+    simulation_error_message: Optional[str] = Field(None, description="模拟失败时的错误信息")
+
+    is_active: bool = Field(default=True, description="标记Alpha是否为活跃/选中状态")
+    # WQB 模拟相关ID
+    wqb_simulation_id: Optional[str] = Field(None, description="WorldQuant BRAIN Simulation ID (如果适用)")
+    wqb_simulation_details: Optional[Dict[str, Any]] = Field(None, description="来自WQB平台的额外模拟详情")
 
     class Config:
-        schema_extra = {
-            "example": {
-                "id": 101,
-                "experiment_id": 1,
-                "expression": "rank(close - open)",
-                "depth": 2,
-                "iteration": 5,
-                "calculated_fitness_score": 1.52,
-                "simulated_at": "2023-01-02T12:00:00Z",
-                "error_message": None,
-                "is_history_best": False
-            }
-        }
+        orm_mode = True # 允许从ORM对象自动映射 (Pydantic V1)
+        # from_attributes = True # Pydantic V2
+
+# --- Experiment 相关的 Schema ---
+class ExperimentBase(BaseModel):
+    """实验的基础模型"""
+    name: str = Field(..., min_length=3, max_length=100, description="实验的名称")
+    description: Optional[str] = Field(None, description="实验的详细描述")
+    ga_config_json: Dict[str, Any] = Field(..., description="遗传算法配置 (JSON格式)")
+    simulation_config_json: Dict[str, Any] = Field(..., description="模拟回测配置 (JSON格式)")
+
+class ExperimentCreate(ExperimentBase):
+    """用于创建新实验的模型"""
+    pass # 目前与 Base 相同，但可以扩展
+
+class ExperimentUpdate(BaseModel):
+    """用于更新实验的模型 (部分更新)"""
+    name: Optional[str] = Field(None, min_length=3, max_length=100)
+    description: Optional[str] = None
+    ga_config_json: Optional[Dict[str, Any]] = None
+    simulation_config_json: Optional[Dict[str, Any]] = None
+    status: Optional[str] = Field(None, description="实验状态 (例如 PENDING, RUNNING, COMPLETED)") # 考虑使用枚举
+    current_progress: Optional[int] = Field(None, ge=0, le=100, description="实验当前进度百分比")
+    current_depth: Optional[int] = Field(None, ge=0, description="GA进行到的当前深度")
+    current_iteration_at_depth: Optional[int] = Field(None, ge=0, description="当前深度下的迭代次数")
 
 
-class AlphaDetailsResponse(AlphaBase): # 也从AlphaBase继承，包含所有基础字段
-    """
-    用于API响应的单个Alpha的全部详细信息模型。
-    """
-    # 从AlphaBase继承了: id, experiment_id, expression, depth, iteration,
-    #                   calculated_fitness_score, simulated_at, error_message
+class ExperimentResponse(ExperimentBase):
+    """用于API响应的实验模型"""
+    id: uuid.UUID = Field(..., description="实验在数据库中的唯一ID") # 改为 UUID
+    user_id: Optional[uuid.UUID] = Field(None, description="创建实验的用户ID (如果多用户)") # 改为 UUID
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    status: str = Field(default="PENDING", description="实验状态")
+    current_progress: int = Field(default=0, description="实验当前进度百分比")
+    current_depth: Optional[int] = Field(None, description="GA进行到的当前深度")
+    current_iteration_at_depth: Optional[int] = Field(None, description="当前深度下的迭代次数")
 
-    parent_ids: Optional[List[int]] = Field(None, description="父Alpha的ID列表（如果通过遗传操作产生）。") # 假设ID是整数
-    simulation_settings_json: Optional[Dict[str, Any]] = Field(None, description="模拟此Alpha时使用的具体参数设置（JSON对象）。")
-
-    is_stats_json: Optional[Dict[str, Any]] = Field(None, description="样本内（IS）回测的详细统计数据（JSON对象）。")
-    is_tests_json: Optional[Dict[str, Any]] = Field(None, description="样本内（IS）的各项检验结果，如PValue测试（JSON对象）。")
-    oos_stats_json: Optional[Dict[str, Any]] = Field(None, description="样本外（OOS）回测的详细统计数据（JSON对象）。")
-    pnl_data_json: Optional[Dict[str, Any]] = Field(None, description="PnL曲线数据，通常是时间序列格式（JSON对象）。")
-    yearly_stats_data_json: Optional[Dict[str, Any]] = Field(None, description="年度统计数据（JSON对象）。")
-
-    is_history_best: Optional[bool] = Field(None, description="标记此Alpha是否曾是历史最优之一。")
+    # 可以选择性地包含与实验关联的Alphas的简要信息或数量
+    # alphas: List[AlphaResponse] = [] # 直接嵌入可能导致响应过大，通常分页获取
+    alpha_count: int = Field(0, description="此实验生成的Alpha数量")
 
     class Config:
         orm_mode = True
-        schema_extra = {
-            "example": {
-                "id": 101,
-                "experiment_id": 1,
-                "expression": "rank(close - open)",
-                "depth": 2,
-                "iteration": 5,
-                "calculated_fitness_score": 1.52,
-                "simulated_at": "2023-01-02T12:00:00Z",
-                "error_message": None,
-                "parent_ids": [88, 92],
-                "simulation_settings_json": {"universe": "TOP3000", "delay": 1, "region": "USA"},
-                "is_stats_json": {"sharpe": 1.52, "avg_return": 0.001, "...": "..."},
-                "is_tests_json": {"t_stat_turnover": 2.5, "...": "..."},
-                "oos_stats_json": {"sharpe": 0.88, "...": "..."},
-                "pnl_data_json": {"2023-01-01": 1.0, "2023-01-02": 1.01, "...": "..."},
-                "yearly_stats_data_json": {"2022": {"sharpe": 1.2}, "2023": {"sharpe": 0.9}},
-                "is_history_best": False
-            }
-        }
+        # from_attributes = True # Pydantic V2
 
-# ... (其他已有的或未来的 Pydantic 模型) ...
+# --- GA Task 相关的 Schema (用于Celery任务状态等) ---
+class GeneticAlgorithmTaskStatus(BaseModel):
+    """遗传算法Celery任务的状态响应模型"""
+    task_id: str = Field(..., description="Celery任务的ID")
+    status: str = Field(..., description="任务当前状态 (例如 PENDING, STARTED, SUCCESS, FAILURE)")
+    progress: int = Field(default=0, description="任务大致进度百分比")
+    details: Optional[Dict[str, Any]] = Field(None, description="与任务相关的其他详细信息或结果")
+    current_depth: Optional[int] = Field(None, description="GA进行到的当前深度 (如果任务正在运行)")
+    current_iteration_at_depth: Optional[int] = Field(None, description="当前深度下的迭代次数 (如果任务正在运行)")
+    error_message: Optional[str] = Field(None, description="如果任务失败，相关的错误信息")
+
+
+# --- Alpha 组合与导出相关的 Schema (DEV-027) ---
+
+class AlphaCombinationRequest(BaseModel):
+    """请求组合多个Alpha的输入模型"""
+    alpha_ids: List[str] = Field(..., description="要组合的Alpha的数据库ID列表 (UUID字符串形式)")
+    method: str = Field(default="add", description="组合方法，例如 'add' 或 'mean'")
+    # （可选）可以加入组合后Alpha的模拟设置，如果希望用户指定
+    # simulation_settings: Optional[Dict[str, Any]] = Field(None, description="组合后Alpha的模拟设置")
+
+    @validator('method')
+    def method_must_be_supported(cls, v):
+        """验证组合方法是否为支持的方法"""
+        supported_methods = ["add", "mean"]
+        if v not in supported_methods:
+            raise ValueError(f"不支持的组合方法: '{v}'. 支持的方法: {supported_methods}")
+        return v
+
+class CombinedAlphaSimulatedData(BaseModel): # 用于嵌套在响应中显示模拟结果
+    """组合后Alpha的模拟结果数据结构 (简化版)"""
+    is_stats: Optional[Dict[str, Any]] = Field(None, description="样本内统计数据")
+    is_tests: Optional[Dict[str, Any]] = Field(None, description="样本内测试结果")
+    pnl_data: Optional[Dict[str, Any]] = Field(None, description="PNL数据")
+    yearly_stats_data: Optional[Dict[str, Any]] = Field(None, description="年度统计数据")
+    # 根据需要添加更多模拟结果字段，例如 pnl_data_json 等
+    status: Optional[str] = Field(None, description="模拟状态 (例如 COMPLETED, FAILED)")
+    error_message: Optional[str] = Field(None, description="模拟过程中的错误信息")
+
+
+class AlphaCombinationResponse(BaseModel):
+    """组合Alpha操作的响应模型"""
+    combined_expression: str = Field(..., description="组合生成的Alpha表达式")
+    simulation_details: Optional[CombinedAlphaSimulatedData] = Field(None, description="组合后Alpha的模拟结果详情")
+    # 如果组合后的Alpha会被保存，可以返回其ID
+    # new_alpha_id: Optional[str] = Field(None, description="如果组合后的Alpha被保存，则为其新ID (UUID字符串形式)")
+
+
+class AlphaExportResponse(BaseModel):
+    """导出Alpha数据的响应模型"""
+    alpha_id: str = Field(..., description="Alpha的ID (UUID字符串形式)")
+    expression: str = Field(..., description="Alpha的表达式")
+    simulation_settings_json: Optional[Dict[str, Any]] = Field(None, description="Alpha原始的模拟设置")
+    # 可以考虑加入其他元数据
+    experiment_id: Optional[str] = Field(None, description="关联的实验ID (UUID字符串形式, 如果有)")
+    created_at: Optional[datetime.datetime] = Field(None, description="Alpha创建时间")
+    description: Optional[str] = Field(None, description="Alpha的描述")
+
+    class Config:
+        orm_mode = True # 允许从ORM对象自动映射
+        # from_attributes = True # Pydantic V2
+        # 如果 created_at 直接来自 SQLAlchemy 模型，orm_mode 会处理
+        # 如果是手动填充，确保类型正确
+
+
+# --- 新增：API 使用与错误状态相关的 Schema (DEV-028) ---
+
+class ApiUsageResponse(BaseModel):
+    """API使用量统计的响应模型"""
+    total_calls_today: int = Field(0, description="今日应用自身记录的对WQ Brain API的调用次数")
+    # 以下字段依赖于WQ Brain平台是否提供以及BrainApiSession的实现程度
+    remaining_daily_quota: Optional[int] = Field(None, description="预估的每日剩余配额 (如果可用)")
+    total_daily_quota: Optional[int] = Field(None, description="预估的每日总配额 (如果可用)")
+    quota_reset_time: Optional[datetime.datetime] = Field(None, description="配额预计重置时间 (UTC, 如果可用)")
+    # estimated_cost_today: Optional[float] = Field(None, description="今日预估API成本 (如果可用)")
+    data_source: str = Field("应用内部初步统计/模拟数据", description="API使用数据的来源说明")
+
+class ErrorLogEntry(BaseModel):
+    """单个错误日志条目的数据模型"""
+    log_id: uuid.UUID = Field(..., description="日志条目的唯一ID (通常是关联的Alpha或记录的ID)")
+    alpha_id: Optional[str] = Field(None, description="关联的Alpha的ID (UUID字符串, 如果错误与特定Alpha相关)")
+    experiment_id: Optional[str] = Field(None, description="关联的实验ID (UUID字符串, 如果错误与特定实验相关)")
+    timestamp: datetime.datetime = Field(..., description="错误发生的时间戳 (UTC)")
+    expression_preview: Optional[str] = Field(None, description="相关的Alpha表达式预览 (截断显示)")
+    error_message: str = Field(..., description="详细的错误信息")
+    # error_source: Optional[str] = Field(None, description="错误来源模块，例如 'simulation', 'database', 'task_processing'")
+
+    class Config:
+        orm_mode = True # 如果 ErrorLogEntry 是从 ORM 对象（如AlphaModel）转换而来
+
+
+class RecentErrorLogResponse(BaseModel):
+    """最近错误日志列表的响应模型 (支持分页)"""
+    errors: List[ErrorLogEntry] = Field(..., description="最近的错误日志条目列表")
+    total_available_errors: int = Field(..., description="数据库中符合条件的错误总数 (用于计算分页)")
+    page: int = Field(..., description="当前页码")
+    page_size: int = Field(..., description="每页条目数")
+    total_pages: int = Field(..., description="总页数")
