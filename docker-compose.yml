@@ -22,11 +22,14 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       # DATABASE_URL: SQLite 数据库文件的路径
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      # 新增: 应用的日志级别
-      # 此环境变量由 app.core.logging_config.py 在启动时读取。
-      # 有效值通常包括 DEBUG, INFO, WARNING, ERROR, CRITICAL (在代码中会转换为大写)。
-      # INFO 是一个生产环境常用的级别，DEBUG 则用于开发和故障排查。
+      # LOG_LEVEL: 应用的日志级别
       LOG_LEVEL: "INFO"
+      # 新增: WorldQuant Brain API 凭据 (本地开发/测试占位符)
+      # 重要: 请将以下值替换为您的真实凭据进行本地测试。
+      # 警告: 请勿将真实凭据硬编码提交到版本控制系统。
+      # 生产环境中应使用 Docker Secrets 或安全的外部环境变量注入方式。
+      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 您的 WorldQuant Brain 邮箱
+      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 您的 WorldQuant Brain 密码
     # 依赖关系 (depends_on)
     depends_on:
       - redis
@@ -56,9 +59,13 @@ services:
     environment:
       REDIS_URL: "redis://redis:6379/0"
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      # 新增: Worker 服务的日志级别
-      # 通常与 web 服务保持一致，但也可以根据需要独立配置。
       LOG_LEVEL: "INFO"
+      # 新增: WorldQuant Brain API 凭据 (与 web 服务相同)
+      # 重要: 请将以下值替换为您的真实凭据进行本地测试。
+      # 警告: 请勿将真实凭据硬编码提交到版本控制系统。
+      # 生产环境中应使用 Docker Secrets 或安全的外部环境变量注入方式。
+      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 您的 WorldQuant Brain 邮箱
+      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 您的 WorldQuant Brain 密码
     # 依赖关系 (depends_on)
     depends_on:
       - redis
