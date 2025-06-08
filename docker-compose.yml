@@ -24,7 +24,7 @@ services:
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
       # LOG_LEVEL: 应用的日志级别
       LOG_LEVEL: "INFO"
-      # 新增: WorldQuant Brain API 凭据 (本地开发/测试占位符)
+      # WorldQuant Brain API 凭据 (本地开发/测试占位符)
       # 重要: 请将以下值替换为您的真实凭据进行本地测试。
       # 警告: 请勿将真实凭据硬编码提交到版本控制系统。
       # 生产环境中应使用 Docker Secrets 或安全的外部环境变量注入方式。
@@ -52,31 +52,41 @@ services:
   # Worker 服务 (RQ Worker - Redis Queue Worker)
   worker:
     # 构建指令 (build)
+    # 与 web 服务使用相同的 Dockerfile
     build: .
-    # 启动命令 (command)
-    command: ["tail", "-f", "/dev/null"] # 占位符命令
+    # 修改后: 实际启动 RQ Worker 的命令
+    # - python -m rq: 使用 python 模块执行 rq，确保在正确的环境中运行
+    # - worker: 指定启动一个 RQ worker 进程
+    # - -u redis://redis:6379/0: 指定连接的 Redis URL。 'redis' 是服务名，'0' 是数据库编号。
+    #   此 URL 应与环境变量 REDIS_URL 的用途一致，但 rq worker 命令通常直接接受此参数。
+    # - default: 指定此 worker 监听名为 'default' 的队列。可以指定多个队列，如 'default high_priority'。
+    command: ["python", "-m", "rq", "worker", "-u", "redis://redis:6379/0", "default"]
     # 环境变量 (environment)
     environment:
-      REDIS_URL: "redis://redis:6379/0"
+      REDIS_URL: "redis://redis:6379/0" # RQ worker 内部代码可能仍会使用此环境变量
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
       LOG_LEVEL: "INFO"
-      # 新增: WorldQuant Brain API 凭据 (与 web 服务相同)
-      # 重要: 请将以下值替换为您的真实凭据进行本地测试。
-      # 警告: 请勿将真实凭据硬编码提交到版本控制系统。
-      # 生产环境中应使用 Docker Secrets 或安全的外部环境变量注入方式。
-      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 您的 WorldQuant Brain 邮箱
-      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 您的 WorldQuant Brain 密码
+      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 与 web 服务相同
+      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 与 web 服务相同
     # 依赖关系 (depends_on)
+    # worker 服务依赖于 redis 服务 (用于连接 RQ)
+    # worker 服务也可能依赖 web 服务 (例如，等待 web 服务完成数据库迁移，或共享代码)
     depends_on:
       - redis
-      - web
+      - web # 确保 web 服务（可能包含应用代码的最新版本）优先启动
     # 重启策略 (restart)
     restart: unless-stopped
     # 卷挂载 (volumes)
+    # 与 web 服务共享数据库卷，以确保 worker 可以访问相同的数据
     volumes:
       - alpha_db_data:/app/data
 
 # 定义具名卷 (volumes)
+# 具名卷由 Docker 管理，用于持久化数据
 volumes:
+  # Redis 数据卷
+  # 用于持久化 Redis 数据库的数据
   redis_data:
+  # SQLite 数据库数据卷
+  # 用于持久化 SQLite 数据库文件 (alpha_evolution.db)
   alpha_db_data:
