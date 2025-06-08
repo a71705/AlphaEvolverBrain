@@ -19,78 +19,57 @@ services:
     # 设置容器内部的环境变量
     environment:
       # REDIS_URL: 指定 Redis 服务的连接地址
-      # 'redis' 是下面定义的 Redis 服务的名称，Docker Compose 会处理网络解析
-      # '/0' 表示使用 Redis 的 0 号数据库
       REDIS_URL: "redis://redis:6379/0"
-      # 新增: SQLite 数据库文件的路径
-      # DATABASE_URL 指向容器内 /app/data 目录下的 alpha_evolution.db 文件
-      # /app/data 目录将通过下面的 volumes 指令映射到持久化存储卷 alpha_db_data
+      # DATABASE_URL: SQLite 数据库文件的路径
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      # LOG_LEVEL: "INFO" # 日志级别将在 DEV-004 中正式添加
+      # 新增: 应用的日志级别
+      # 此环境变量由 app.core.logging_config.py 在启动时读取。
+      # 有效值通常包括 DEBUG, INFO, WARNING, ERROR, CRITICAL (在代码中会转换为大写)。
+      # INFO 是一个生产环境常用的级别，DEBUG 则用于开发和故障排查。
+      LOG_LEVEL: "INFO"
     # 依赖关系 (depends_on)
-    # web 服务依赖于 redis 服务，确保 redis 服务在 web 服务启动前启动
     depends_on:
       - redis
     # 重启策略 (restart)
-    # unless-stopped: 除非手动停止容器，否则在退出时总是重启容器
     restart: unless-stopped
     # 卷挂载 (volumes)
-    # 将名为 'alpha_db_data' 的具名卷挂载到容器的 /app/data 目录
-    # /app 是 Dockerfile 中设置的工作目录，因此 SQLite 数据库的相对路径 ./data/alpha_evolution.db
-    # 将解析为容器内的 /app/data/alpha_evolution.db
     volumes:
       - alpha_db_data:/app/data
 
   # Redis 服务
   redis:
     # 镜像 (image)
-    # 使用官方最新的 Redis 镜像
     image: "redis:latest"
     # 卷挂载 (volumes)
-    # redis_data:/data: 将名为 'redis_data' 的具名卷挂载到容器的 /data 目录
-    # 这是 Redis 默认的数据持久化目录
     volumes:
-      - redis_data:/data # Redis 数据持久化卷，确保数据在容器重启后依然存在
+      - redis_data:/data # Redis 数据持久化卷
     # 重启策略 (restart)
     restart: unless-stopped
 
   # Worker 服务 (RQ Worker - Redis Queue Worker)
-  # 此服务将在 DEV-013 中完整配置其启动命令
   worker:
     # 构建指令 (build)
-    # 与 web 服务使用相同的 Dockerfile
     build: .
     # 启动命令 (command)
-    # ["tail", "-f", "/dev/null"]: 这是一个占位符命令
-    # 目的是保持容器运行，直到在后续任务中定义实际的 RQ Worker 启动命令
-    command: ["tail", "-f", "/dev/null"]
+    command: ["tail", "-f", "/dev/null"] # 占位符命令
     # 环境变量 (environment)
     environment:
       REDIS_URL: "redis://redis:6379/0"
-      # 新增: SQLite 数据库文件的路径，与 web 服务配置相同
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      # LOG_LEVEL: "INFO" # 日志级别将在 DEV-004 中正式添加
+      # 新增: Worker 服务的日志级别
+      # 通常与 web 服务保持一致，但也可以根据需要独立配置。
+      LOG_LEVEL: "INFO"
     # 依赖关系 (depends_on)
-    # worker 服务依赖于 redis 服务 (用于连接 RQ)
-    # worker 服务也可能依赖 web 服务 (例如，等待 web 服务完成数据库迁移或需要访问数据库)
     depends_on:
       - redis
       - web
     # 重启策略 (restart)
     restart: unless-stopped
     # 卷挂载 (volumes)
-    # 将名为 'alpha_db_data' 的具名卷挂载到容器的 /app/data 目录
-    # 确保 worker 服务也能访问同一个持久化的数据库文件
     volumes:
       - alpha_db_data:/app/data
 
 # 定义具名卷 (volumes)
-# 具名卷由 Docker 管理，用于持久化数据
 volumes:
-  # Redis 数据卷
-  # 用于持久化 Redis 数据库的数据
   redis_data:
-  # 新增: SQLite 数据库数据卷
-  # 用于持久化 SQLite 数据库文件 (alpha_evolution.db)
-  # 这样即使容器被删除和重建，数据库文件也会保留
   alpha_db_data:

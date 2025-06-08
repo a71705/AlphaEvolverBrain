@@ -9,6 +9,9 @@ from .api.v1 import api_router
 # 从同级目录的 database.py 文件中导入 create_tables 函数
 # 此函数用于在应用启动时创建数据库表
 from .database import create_tables
+# 从 app.core.logging_config 模块导入日志配置函数
+# 此函数用于在应用启动时配置日志记录器
+from app.core.logging_config import configure_logging
 
 # 创建 FastAPI 应用实例
 # title 参数设置了应用的标题，会显示在 Swagger UI 等文档中
@@ -33,12 +36,14 @@ app.add_middleware(
 # @app.on_event("startup") 装饰器指定此函数在 FastAPI 应用启动时执行
 @app.on_event("startup")
 async def startup_event():
+    # 首先配置日志系统
+    # 这确保了应用启动过程中的所有日志（包括后续的表创建等操作）都能按照预期格式进行记录
+    configure_logging()
+
     # 调用 create_tables 函数
     # 这将确保在应用启动时，所有在 models.py 中定义的、继承自 Base 的表都会被创建 (如果尚不存在)
     # 这是进行数据库初始化的推荐位置
     create_tables()
-    # 后续任务 (如 DEV-004 日志配置) 可能会在此处添加更多启动逻辑
-    # 例如: configure_logging()
 
 # 包含 v1 版本的 API 路由
 # 所有在 api_router 中定义的路由都会以 "/api/v1" 作为前缀
