@@ -1,0 +1,12 @@
+# requirements.txt
+# 项目核心依赖
+# FastAPI: 用于构建 API 的现代、快速（高性能）的 web 框架
+# Uvicorn: ASGI 服务器，用于运行 FastAPI 应用 (standard 版本包含性能优化)
+# Redis: 用于 RQ 任务队列和可能的缓存
+# RQ (Redis Queue): 用于处理后台任务的 Python 库
+# python-dotenv: 用于从 .env 文件加载环境变量，方便本地开发
+fastapi
+uvicorn[standard]
+redis
+rq
+python-dotenv
