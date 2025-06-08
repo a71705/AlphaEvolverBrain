@@ -13,6 +13,9 @@ from .experiments import router as experiments_router
 # 从同级目录下的 alphas.py 文件中导入单个Alpha资源管理相关的路由。
 from .alphas import router as alphas_router
 
+# 从同级目录下的 data_sources.py 文件中导入数据源元数据相关的路由。
+from .data_sources import router as data_sources_router
+
 # 导入其他未来可能存在的v1版本的路由模块的占位符（将被后续任务填充）
 # from .experiments import router as experiments_router
 # from .alphas import router as alphas_router
@@ -36,6 +39,9 @@ api_router.include_router(experiments_router)
 
 # 将 Alpha 资源管理路由包含到 v1 的主路由器中。
 api_router.include_router(alphas_router) # prefix="/alphas" 已在 alphas_router 内部定义
+
+# 将数据源元数据路由包含到 v1 的主路由器中。
+api_router.include_router(data_sources_router) # prefix="/data_sources" 已在 data_sources_router 内部定义
 
 
 # 占位符注释：后续其他API模块的路由将在这里添加

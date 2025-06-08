@@ -132,6 +132,75 @@ class ExperimentResponse(BaseModel):
 
 # ... (其他已有的或未来的 Pydantic 模型) ...
 
+# --- 数据源元数据相关的 Pydantic 模型 ---
+
+class DataSetResponse(BaseModel):
+    """
+    用于API响应的单个数据集的元数据模型。
+    字段应对应 BrainApiSession.get_datasets() 返回的DataFrame的列。
+    注意：确切的字段名和类型取决于实际的WorldQuant Brain API响应。以下为常见示例。
+    """
+    # 假设数据集有以下字段 (需要根据实际API调整)
+    id: str = Field(..., description="数据集的唯一标识符。")
+    name: str = Field(..., description="数据集的名称。")
+    description: Optional[str] = Field(None, description="数据集的描述。")
+    category: Optional[str] = Field(None, description="数据集的分类。")
+    instrument_type: Optional[str] = Field(None, description="适用的资产类型，例如 EQUITY, FUTURES。")
+    region: Optional[str] = Field(None, description="适用的地区，例如 USA, CHN, GLOBAL。")
+    # delay: Optional[int] = Field(None, description="数据的延迟天数。") # get_datasets 的参数，不一定在返回对象中
+    # universe: Optional[str] = Field(None, description="适用的资产池。") # 同上
+    # 其他可能的字段: created_at, updated_at, data_provider, etc.
+    source: Optional[str] = Field(None, description="数据来源或提供商。")
+    data_frequency: Optional[str] = Field(None, description="数据频率，例如 DAILY, INTRADAY。")
+
+
+    class Config:
+        orm_mode = False # 因为数据通常是从DataFrame的to_dict转换而来，而非直接ORM对象
+        schema_extra = {
+            "example": {
+                "id": "equity_usa_daily_am_101",
+                "name": "美国股票日行情数据",
+                "description": "包含美国股票市场的每日开高低收价格和成交量等。",
+                "category": "行情数据",
+                "instrument_type": "EQUITY",
+                "region": "USA",
+                "source": "Exchange",
+                "data_frequency": "DAILY"
+            }
+        }
+
+
+class DataFieldResponse(BaseModel):
+    """
+    用于API响应的单个数据字段的元数据模型。
+    字段应对应 BrainApiSession.get_datafields() 返回的DataFrame的列。
+    注意：确切的字段名和类型取决于实际的WorldQuant Brain API响应。以下为常见示例。
+    """
+    # 假设数据字段有以下字段 (需要根据实际API调整)
+    id: str = Field(..., description="数据字段的唯一标识符（例如 'close', 'adv20'）。")
+    name: str = Field(..., description="数据字段的显示名称或标签。")
+    description: Optional[str] = Field(None, description="数据字段的详细描述。")
+    data_type: Optional[str] = Field(None, alias="dataType", description="数据字段的数据类型 (例如 'double', 'long', 'string', 'boolean')。API可能用驼峰命名。")
+    dataset_id: Optional[str] = Field(None, alias="datasetId", description="该字段所属的数据集的ID (如果适用)。")
+    category: Optional[str] = Field(None, description="数据字段的分类 (例如 '价格', '成交量', '技术指标')。")
+    # expression: Optional[str] = Field(None, description="如果该字段是衍生字段，其计算表达式。") # 某些API可能有
+
+    class Config:
+        orm_mode = False # 从DataFrame的to_dict转换
+        allow_population_by_field_name = True # 允许使用字段名或别名 (如 dataType) 进行填充
+        schema_extra = {
+            "example": {
+                "id": "close_price",
+                "name": "收盘价",
+                "description": "资产在交易日结束时的最后成交价格。",
+                "dataType": "double", # 注意别名 dataType
+                "datasetId": "equity_usa_daily_am_101",
+                "category": "价格数据"
+            }
+        }
+
+# ... (其他已有的或未来的 Pydantic 模型) ...
+
 # --- Alpha 相关的 Pydantic 模型 ---
 
 class AlphaBase(BaseModel): # 创建一个基础Alpha模型，包含通用字段
