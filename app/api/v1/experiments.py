@@ -499,3 +499,106 @@ async def list_experiments(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取实验列表时发生内部错误: {str(e)}"
         )
+
+@router.get(
+    "/{experiment_id}/alphas",
+    response_model=List[AlphaResponse],
+    summary="获取指定实验下的Alpha列表",
+    description="根据实验ID列出其包含的所有Alpha策略，支持按深度、适应度分数等条件过滤，以及排序和分页。"
+)
+async def list_alphas_for_experiment(
+    experiment_id: int,
+    db: Session = Depends(get_db),
+    depth: Optional[int] = Query(None, description="按Alpha树的深度筛选。"),
+    min_fitness: Optional[float] = Query(None, alias="minFitness", description="按最小适应度得分筛选。"),
+    sort_by: str = Query("calculated_fitness_score", description="排序字段，例如 'id', 'calculated_fitness_score', 'simulated_at'。"),
+    order: str = Query("desc", description="排序顺序：'asc' (升序) 或 'desc' (降序)。"),
+    skip: int = Query(0, ge=0, alias="offset", description="分页查询的起始位置（偏移量）。"),
+    limit: int = Query(100, ge=1, le=200, description="每页返回的Alpha数量上限（最大200）。")
+):
+    """
+    获取指定实验ID下的Alpha列表。
+
+    支持通过查询参数进行过滤 (例如按深度 `depth`, 最小适应度 `min_fitness`)，
+    排序 (按 `sort_by` 字段及 `order` 方向) 和分页 (`skip`, `limit`)。
+
+    参数:
+        experiment_id (int): 实验的ID (路径参数)。
+        db (Session): SQLAlchemy 数据库会话。
+        depth (Optional[int]): 可选，按Alpha的深度进行精确匹配过滤。
+        min_fitness (Optional[float]): 可选，按Alpha的计算适应度得分进行下限过滤 (大于或等于此值)。
+        sort_by (str): 用于排序的字段名。默认为 'calculated_fitness_score'。
+                       需要校验此字段是否是 Alpha 模型允许排序的有效属性。
+        order (str): 排序方向，'asc' 或 'desc'。默认为 'desc'。
+        skip (int): 分页查询的偏移量。
+        limit (int): 每页返回的最大记录数。
+
+    返回:
+        List[AlphaResponse]: 符合条件的Alpha列表，每个Alpha以AlphaResponse格式呈现。
+
+    异常:
+        HTTPException (404): 如果具有指定ID的实验未找到。
+        HTTPException (400): 如果排序参数无效。
+        HTTPException (500): 如果发生其他服务器内部错误。
+    """
+    logger.info(f"收到获取实验 {experiment_id} 下 Alpha 列表的请求。筛选条件: depth={depth}, min_fitness={min_fitness}。排序: by={sort_by}, order={order}。分页: offset={skip}, limit={limit}")
+
+    try:
+        # 首先检查实验是否存在，以提供更明确的404错误
+        experiment_exists = db.query(Experiment).filter(Experiment.id == experiment_id).first()
+        if not experiment_exists:
+            logger.warning(f"尝试获取Alphas列表失败：实验ID {experiment_id} 未找到。")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ID为 {experiment_id} 的实验未找到。")
+
+        # 构建基础查询，过滤指定实验ID的Alphas
+        query = db.query(Alpha).filter(Alpha.experiment_id == experiment_id)
+
+        # 应用可选的过滤条件
+        if depth is not None:
+            logger.debug(f"应用深度筛选: depth == {depth}")
+            query = query.filter(Alpha.depth == depth)
+
+        if min_fitness is not None:
+            logger.debug(f"应用最小适应度筛选: calculated_fitness_score >= {min_fitness}")
+            query = query.filter(Alpha.calculated_fitness_score >= min_fitness)
+
+        # 应用排序
+        # 需要校验 sort_by 参数是否是 Alpha 模型的一个有效且可排序的列
+        if hasattr(Alpha, sort_by):
+            sort_column = getattr(Alpha, sort_by)
+            if order.lower() == "asc":
+                query = query.order_by(sort_column.asc())
+            elif order.lower() == "desc":
+                query = query.order_by(sort_column.desc())
+            else:
+                logger.warning(f"无效的排序方向: '{order}'。将使用默认降序。")
+                query = query.order_by(sort_column.desc()) # 默认或处理无效order值
+        else:
+            logger.warning(f"无效的排序字段: '{sort_by}'。将使用默认按 'calculated_fitness_score' 降序排序。")
+            # 可以选择抛出400错误，或使用默认排序
+            # raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"无效的排序字段: {sort_by}")
+            query = query.order_by(Alpha.calculated_fitness_score.desc())
+
+
+        # 获取总数 (用于潜在的分页元数据，但当前响应模型不包含)
+        # total_alphas = query.count()
+        # logger.debug(f"实验 {experiment_id} 下符合筛选条件的Alpha总数: {total_alphas}")
+
+        # 应用分页
+        alphas_orm = query.offset(skip).limit(limit).all()
+        logger.info(f"为实验 {experiment_id} 查询到 {len(alphas_orm)} 条Alpha记录。")
+
+        # 将 SQLAlchemy ORM 对象转换为 Pydantic 响应模型列表
+        # AlphaResponse 的 Config 中 orm_mode = True 会自动处理转换
+        return alphas_orm # FastAPI 会自动处理 List[Alpha] 到 List[AlphaResponse]
+
+    except HTTPException: # 重新抛出已处理的 HTTPException (如404)
+        raise
+    except Exception as e:
+        logger.error(f"获取实验 {experiment_id} 的Alpha列表时发生未预料的服务器内部错误: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取实验 {experiment_id} 的Alpha列表时发生内部错误: {str(e)}"
+        )
+
+# ... (文件末尾)

@@ -131,3 +131,91 @@ class ExperimentResponse(BaseModel):
         }
 
 # ... (其他已有的或未来的 Pydantic 模型) ...
+
+# --- Alpha 相关的 Pydantic 模型 ---
+
+class AlphaBase(BaseModel): # 创建一个基础Alpha模型，包含通用字段
+    """
+    Alpha 模型的基础字段，可被其他 Alpha 相关响应模型继承。
+    """
+    id: int = Field(..., description="Alpha的唯一标识符。")
+    experiment_id: int = Field(..., description="此Alpha所属实验的ID。")
+    expression: str = Field(..., description="Alpha的表达式字符串。")
+    depth: Optional[int] = Field(None, description="生成此Alpha的树的深度。") # 改为Optional以适应可能的未知情况
+    iteration: Optional[int] = Field(None, description="Alpha在遗传算法的第几次迭代中产生。") # 同上
+    calculated_fitness_score: Optional[float] = Field(None, description="计算得出的适应度得分。")
+    simulated_at: Optional[datetime] = Field(None, description="Alpha模拟完成的UTC时间。")
+    error_message: Optional[str] = Field(None, description="如果Alpha模拟或处理失败，记录的错误信息。")
+
+    class Config:
+        orm_mode = True # 允许从ORM对象读取数据
+
+
+class AlphaResponse(AlphaBase):
+    """
+    用于API响应（例如列表视图）的Alpha简要信息模型。
+    继承自 AlphaBase。
+    """
+    # AlphaResponse 可以直接使用 AlphaBase 的所有字段。
+    # 如果列表视图需要额外字段，可以在这里添加。
+    # 例如，如果需要快速知道是否是历史最佳：
+    is_history_best: Optional[bool] = Field(None, description="标记此Alpha是否曾是历史最优之一。")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 101,
+                "experiment_id": 1,
+                "expression": "rank(close - open)",
+                "depth": 2,
+                "iteration": 5,
+                "calculated_fitness_score": 1.52,
+                "simulated_at": "2023-01-02T12:00:00Z",
+                "error_message": None,
+                "is_history_best": False
+            }
+        }
+
+
+class AlphaDetailsResponse(AlphaBase): # 也从AlphaBase继承，包含所有基础字段
+    """
+    用于API响应的单个Alpha的全部详细信息模型。
+    """
+    # 从AlphaBase继承了: id, experiment_id, expression, depth, iteration,
+    #                   calculated_fitness_score, simulated_at, error_message
+
+    parent_ids: Optional[List[int]] = Field(None, description="父Alpha的ID列表（如果通过遗传操作产生）。") # 假设ID是整数
+    simulation_settings_json: Optional[Dict[str, Any]] = Field(None, description="模拟此Alpha时使用的具体参数设置（JSON对象）。")
+
+    is_stats_json: Optional[Dict[str, Any]] = Field(None, description="样本内（IS）回测的详细统计数据（JSON对象）。")
+    is_tests_json: Optional[Dict[str, Any]] = Field(None, description="样本内（IS）的各项检验结果，如PValue测试（JSON对象）。")
+    oos_stats_json: Optional[Dict[str, Any]] = Field(None, description="样本外（OOS）回测的详细统计数据（JSON对象）。")
+    pnl_data_json: Optional[Dict[str, Any]] = Field(None, description="PnL曲线数据，通常是时间序列格式（JSON对象）。")
+    yearly_stats_data_json: Optional[Dict[str, Any]] = Field(None, description="年度统计数据（JSON对象）。")
+
+    is_history_best: Optional[bool] = Field(None, description="标记此Alpha是否曾是历史最优之一。")
+
+    class Config:
+        orm_mode = True
+        schema_extra = {
+            "example": {
+                "id": 101,
+                "experiment_id": 1,
+                "expression": "rank(close - open)",
+                "depth": 2,
+                "iteration": 5,
+                "calculated_fitness_score": 1.52,
+                "simulated_at": "2023-01-02T12:00:00Z",
+                "error_message": None,
+                "parent_ids": [88, 92],
+                "simulation_settings_json": {"universe": "TOP3000", "delay": 1, "region": "USA"},
+                "is_stats_json": {"sharpe": 1.52, "avg_return": 0.001, "...": "..."},
+                "is_tests_json": {"t_stat_turnover": 2.5, "...": "..."},
+                "oos_stats_json": {"sharpe": 0.88, "...": "..."},
+                "pnl_data_json": {"2023-01-01": 1.0, "2023-01-02": 1.01, "...": "..."},
+                "yearly_stats_data_json": {"2022": {"sharpe": 1.2}, "2023": {"sharpe": 0.9}},
+                "is_history_best": False
+            }
+        }
+
+# ... (其他已有的或未来的 Pydantic 模型) ...
