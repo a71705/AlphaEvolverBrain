@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 # 从同级目录的 api.v1 包中导入 api_router
 # 这个 api_router 包含了 v1 版本的所有 API 端点
 from .api.v1 import api_router
+# 从同级目录的 database.py 文件中导入 create_tables 函数
+# 此函数用于在应用启动时创建数据库表
+from .database import create_tables
 
 # 创建 FastAPI 应用实例
 # title 参数设置了应用的标题，会显示在 Swagger UI 等文档中
@@ -25,6 +28,17 @@ app.add_middleware(
     allow_methods=["*"],  # 允许所有 HTTP 方法 (GET, POST, PUT, DELETE 等)
     allow_headers=["*"],  # 允许所有 HTTP 请求头
 )
+
+# 应用启动事件处理器
+# @app.on_event("startup") 装饰器指定此函数在 FastAPI 应用启动时执行
+@app.on_event("startup")
+async def startup_event():
+    # 调用 create_tables 函数
+    # 这将确保在应用启动时，所有在 models.py 中定义的、继承自 Base 的表都会被创建 (如果尚不存在)
+    # 这是进行数据库初始化的推荐位置
+    create_tables()
+    # 后续任务 (如 DEV-004 日志配置) 可能会在此处添加更多启动逻辑
+    # 例如: configure_logging()
 
 # 包含 v1 版本的 API 路由
 # 所有在 api_router 中定义的路由都会以 "/api/v1" 作为前缀
