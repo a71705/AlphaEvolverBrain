@@ -668,6 +668,144 @@ def crossover(parent1: Node, parent2: Node) -> tuple[Node, Node]:
 
 # ... (文件末尾) ...
 
+# 新增导入 (如果尚未存在)
+from sqlalchemy.orm import Session # 用于类型提示数据库会话
+# from app.core.brain_api import BrainApiSession # BrainApiSession 应能被导入
+# 为了避免循环导入 (如果 brain_api.py 将来可能导入 gp_algo.py 的某些部分)，
+# 可以在函数签名中使用字符串形式的类型提示 'BrainApiSession'。
+# 或者，如果结构清晰，直接导入也可以。这里假设可以直接导入。
+# 如果直接导入 app.core.brain_api 导致问题，则应改为 'BrainApiSession' 字符串提示。
+from app.core.brain_api import BrainApiSession # 确保此导入路径正确且不会引起循环依赖
+
+# (已有的 Node 类, 操作符/终端列表, 树生成/转换函数, fitness_fun, copy_tree, _collect_nodes, mutate, crossover等)
+
+
+# --- 遗传算法各阶段核心函数 (占位符实现) ---
+# 这些函数代表遗传算法主循环的不同阶段/深度。
+# 它们的具体实现将包含选择、交叉、变异、评估等复杂逻辑，
+# 目前仅为占位符，以便在 RQ 任务中被调用。
+
+def best_d1_alphas(
+    brain_api: 'BrainApiSession', # 使用字符串类型提示以避免潜在的循环导入问题
+    db: Session,
+    experiment_id: int, # 或 experiment: Experiment 对象
+    ga_config: dict,
+    # 以下参数 n, m 等是基于原始 code.py 的猜测，可能需要从 ga_config 中提取
+    # 或作为 ga_config 的一部分传入。
+    # n: int, # 例如，每代生成的alpha数量
+    # m: int, # 例如，选择用于下一代的alpha数量
+    # ... 其他特定于此阶段的参数 ...
+) -> List[dict]: # 返回一个包含 "最佳" Alpha 信息的字典列表 (示意性)
+    """
+    遗传算法第一阶段（例如，生成和评估深度为一的 Alpha）。
+    （占位符实现）
+
+    参数:
+        brain_api (BrainApiSession): 用于与 WorldQuant Brain API 交互的会话实例。
+        db (Session): SQLAlchemy 数据库会话实例。
+        experiment_id (int): 当前实验的 ID。
+        ga_config (dict): 包含遗传算法配置参数的字典。
+        # n (int): (示意性) 本阶段要生成的 Alpha 数量。
+        # m (int): (示意性) 本阶段要选择的优秀 Alpha 数量。
+
+    返回:
+        List[dict]: 一个包含本阶段生成的“最佳”Alpha（或其摘要信息）的字典列表。
+                    此返回结构是示意性的。
+    """
+    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d1_alphas (占位符)。")
+    logger.debug(f"GA 配置 (部分): {ga_config.get('population_size', 'N/A')}")
+
+    # 实际逻辑将涉及：
+    # 1. 使用 app.core.gp_algo.depth_one_trees 生成初始种群。
+    # 2. 使用 app.core.gp_algo.tree_to_alpha 转换为表达式。
+    # 3. 使用 brain_api.start_simulation 和 brain_api.simulation_progress/multisimulation_progress 提交模拟并获取结果。
+    # 4. 将 Alpha 表达式、模拟结果、配置等存入数据库 (Alpha 模型)。
+    # 5. 使用 app.core.gp_algo.fitness_fun 评估适应度，并更新 Alpha 记录的 fitness_score。
+    # 6. 根据适应度选择优胜者。
+
+    # 占位符行为：
+    time.sleep(2) # 模拟工作
+    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d1_alphas (占位符) 完成。")
+
+    # 返回示意性结果
+    return [
+        {"expression": "placeholder_d1_alpha_1", "fitness": 0.5, "details": "来自best_d1_alphas占位符"},
+        {"expression": "placeholder_d1_alpha_2", "fitness": 0.4, "details": "来自best_d1_alphas占位符"}
+    ]
+
+def best_d2_alphas(
+    brain_api: 'BrainApiSession',
+    db: Session,
+    experiment_id: int,
+    ga_config: dict,
+    previous_generation_alphas: List[dict] # 上一代选出的优秀个体
+    # ... 其他参数 ...
+) -> List[dict]:
+    """
+    遗传算法第二阶段（例如，基于深度一的 Alpha 生成和评估深度为二的 Alpha）。
+    （占位符实现）
+
+    参数:
+        brain_api (BrainApiSession): API 会话实例。
+        db (Session): 数据库会话实例。
+        experiment_id (int): 当前实验的 ID。
+        ga_config (dict): 遗传算法配置。
+        previous_generation_alphas (List[dict]): 上一阶段选出的优秀 Alpha（或其表示）。
+
+    返回:
+        List[dict]: 本阶段生成的“最佳”Alpha 字典列表（示意性）。
+    """
+    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d2_alphas (占位符)。")
+    logger.debug(f"接收到上一代 Alpha 数量: {len(previous_generation_alphas)}")
+
+    # 实际逻辑将涉及：
+    # 1. 基于 previous_generation_alphas 进行交叉、变异 (使用 app.core.gp_algo 中的函数)。
+    #    可能结合 depth_one_trees 或 depth_two_tree 生成新的结构。
+    # 2. 转换、模拟、存储、评估 (类似 best_d1_alphas)。
+
+    time.sleep(2) # 模拟工作
+    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d2_alphas (占位符) 完成。")
+    return [
+        {"expression": "placeholder_d2_alpha_1", "fitness": 0.7, "details": "来自best_d2_alphas占位符"}
+    ]
+
+def best_d3_alpha( # 注意函数名是 alpha (单数) 还是 alphas (复数)
+    brain_api: 'BrainApiSession',
+    db: Session,
+    experiment_id: int,
+    ga_config: dict,
+    previous_generation_alphas: List[dict]
+    # ... 其他参数 ...
+) -> List[dict]: # 假设也返回列表以保持一致性，尽管函数名可能是单数
+    """
+    遗传算法第三阶段（例如，生成和评估深度为三的 Alpha，或最终选择阶段）。
+    （占位符实现）
+
+    参数:
+        brain_api (BrainApiSession): API 会话实例。
+        db (Session): 数据库会话实例。
+        experiment_id (int): 当前实验的 ID。
+        ga_config (dict): 遗传算法配置。
+        previous_generation_alphas (List[dict]): 上一阶段选出的优秀 Alpha。
+
+    返回:
+        List[dict]: 本阶段生成的“最佳”Alpha 字典列表（示意性）。
+    """
+    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d3_alpha (占位符)。")
+    logger.debug(f"接收到上一代 Alpha 数量: {len(previous_generation_alphas)}")
+
+    # 实际逻辑与 best_d2_alphas 类似，但可能针对更深的树或最终的筛选。
+
+    time.sleep(2) # 模拟工作
+    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d3_alpha (占位符) 完成。")
+    return [
+        {"expression": "placeholder_d3_alpha_final", "fitness": 0.9, "details": "来自best_d3_alpha占位符"}
+    ]
+
+# logger 实例应已在文件顶部定义 (import logging; logger = logging.getLogger(__name__))
+# time 模块也需要导入 (import time)
+# List 类型提示需要 from typing import List
+
 def depth_one_trees(
     terminal_vals: List[str],  # 参数名修改以避免与全局变量混淆，下同
     bin_ops: List[str],
