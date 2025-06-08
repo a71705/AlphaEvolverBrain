@@ -222,29 +222,41 @@ class BrainApiSession:
                         logger.info("Token 已刷新，将重试请求。")
                         # 如果是最后一次尝试，则不继续，直接抛出原始异常
                         if attempt == self._max_retries:
-                            logger.error(f"Token 刷新后，请求 {method} {url} 达到最大重试次数后仍然失败: {e}")
-                            raise
-                        time.sleep(self._retry_delay) # 等待一段时间再重试
-                        continue # 继续下一次重试
-                    else:
+                    logger.error(f"Token 刷新后，请求 {method} {url} 达到最大重试次数后仍然失败: {e}", exc_info=True) # Add exc_info
+                    raise # Re-raise the original HTTPError e
+                time.sleep(self._retry_delay)
+                continue
+            else: # Token refresh failed
                         logger.error(f"Token 刷新失败，无法重试请求 {method} {url}。")
-                        raise RuntimeError(f"请求 {method} {url} 因认证失败 (401) 且无法刷新 Token 而失败。") from e
+                # Raise a new RuntimeError as the original 'e' (401) might not be the root cause of overall failure anymore
+                raise RuntimeError(f"请求 {method} {url} 因认证失败 (401) 且无法刷新 Token 而最终失败。") from e
 
-                # 对于其他 HTTP 错误，或者如果是最后一次尝试
+
+        # 对于其他 HTTP 错误 (非401)，或者401但不是token刷新相关的失败路径
                 if attempt == self._max_retries:
-                    logger.error(f"请求 {method} {url} 在 {self._max_retries + 1} 次尝试后失败 (HTTP {e.response.status_code}): {e.response.text if e.response else e}")
-                    raise
-                logger.warning(f"请求 {method} {url} 失败 (HTTP {e.response.status_code}): {e.response.text if e.response else e}。将在 {self._retry_delay} 秒后重试...")
+            logger.error(f"请求 {method} {url} 在 {self._max_retries + 1} 次尝试后失败 (HTTP {e.response.status_code}): {e.response.text if e.response else str(e)}", exc_info=True)
+            raise # Re-raise the original HTTPError e
+        logger.warning(f"请求 {method} {url} 失败 (HTTP {e.response.status_code}): {e.response.text if e.response else str(e)}。将在 {self._retry_delay} 秒后重试...", exc_info=True)
 
-            except requests.exceptions.RequestException as e: # 更通用的网络错误
+    except requests.exceptions.RequestException as e: # More general network errors (ConnectTimeout, ReadTimeout, etc.)
+        if attempt == self._max_retries:
+            logger.error(f"请求 {method} {url} 在 {self._max_retries + 1} 次尝试后因连接/请求错误失败: {e}", exc_info=True)
+            raise # Re-raise the original RequestException e
+        logger.warning(f"请求 {method} {url} 发生连接/请求错误: {e}。将在 {self._retry_delay} 秒后重试...", exc_info=True)
+
+    except Exception as e: # Catch any other unexpected exceptions during the request attempt
                 if attempt == self._max_retries:
-                    logger.error(f"请求 {method} {url} 在 {self._max_retries + 1} 次尝试后因连接错误失败: {e}")
-                    raise
-                logger.warning(f"请求 {method} {url} 发生连接错误: {e}。将在 {self._retry_delay} 秒后重试...")
+            logger.error(f"请求 {method} {url} 在 {self._max_retries + 1} 次尝试后因意外错误失败: {e}", exc_info=True)
+            raise # Re-raise the caught exception
+        logger.warning(f"请求 {method} {url} 发生意外错误: {e}。将在 {self._retry_delay} 秒后重试...", exc_info=True)
 
-            time.sleep(self._retry_delay) # 等待一段时间再重试
 
-        raise RuntimeError(f"请求 {method} {url} 在所有重试尝试后均失败。")
+    time.sleep(self._retry_delay)
+
+# Fallback if loop completes without returning or raising (should not happen with current logic)
+# This indicates a logic flaw if reached.
+logger.critical(f"请求 {method} {url} 的重试逻辑异常结束。")
+raise RuntimeError(f"请求 {method} {url} 在所有重试尝试后均失败，且未正确抛出原始异常。")
 
     def start_simulation(self, simulate_data: dict or list) -> requests.Response:
         """
@@ -280,16 +292,19 @@ class BrainApiSession:
         # SIMULATIONS_URL 是在模块级别定义的提交模拟的端点
         # json=simulate_data 将 simulate_data 字典或列表序列化为 JSON 并作为请求体发送
         try:
-            response = self._request_with_retry("POST", SIMULATIONS_URL, json=simulate_data, timeout=30) # 增加超时时间以应对可能的网络延迟或服务端处理
+            response = self._request_with_retry("POST", SIMULATIONS_URL, json=simulate_data, timeout=30)
             logger.info(f"模拟提交请求已发送至 {SIMULATIONS_URL}。响应状态码: {response.status_code}")
-            # logger.debug(f"模拟提交响应内容: {response.text}") # 响应内容可能较大，谨慎记录
             return response
-        except requests.exceptions.RequestException as e:
-            logger.error(f"提交模拟请求到 {SIMULATIONS_URL} 失败: {e}")
-            raise # 将异常重新抛出，以便上层调用者处理
-        except RuntimeError as e:
-            logger.error(f"提交模拟请求到 {SIMULATIONS_URL} 因认证问题失败: {e}")
-            raise
+        except requests.exceptions.RequestException as e: # Specific exception from _request_with_retry
+            logger.error(f"提交模拟请求到 {SIMULATIONS_URL} 失败 (RequestException): {e}", exc_info=True)
+            raise # Re-throw for API endpoint to handle
+        except RuntimeError as e: # Specific exception from _request_with_retry (e.g. auth)
+            logger.error(f"提交模拟请求到 {SIMULATIONS_URL} 失败 (RuntimeError): {e}", exc_info=True)
+            raise # Re-throw for API endpoint to handle
+        except Exception as e: # Catch any other unexpected error from this level
+            logger.error(f"提交模拟请求到 {SIMULATIONS_URL} 时发生意外错误: {e}", exc_info=True)
+            # Consider raising a more specific custom exception or a generic one
+            raise RuntimeError(f"提交模拟时发生意外内部错误: {e}") from e
 
     def simulation_progress(self, simulation_id: str, polling_interval: int = 5, timeout: int = 300) -> dict:
         """
@@ -565,51 +580,53 @@ class BrainApiSession:
                 # 1. {"results": [...], "count": total_items, "next": "next_page_url", "previous": "..."}
                 # 2. {"data": [...], "total": total_items, "page": current, "last_page": ...}
                 # 此处假设第一种结构
-                current_page_items = response_data.get("results", [])
-                total_items = response_data.get("count") # 可选，用于日志或提前判断
-                next_page_url = response_data.get("next") # 是否有下一页的直接链接
+        current_page_items = response_data.get("results", []) # Safely get "results"
+        if not isinstance(current_page_items, list): # Validate type
+            logger.error(f"Datafields API 'results' 字段不是列表: {type(current_page_items)}. 响应: {response_data}")
+            # Depending on strictness, either break or try to continue if possible, or raise error
+            break # Safer to break if response structure is unexpected
 
-                if not current_page_items: # 如果当前页没有数据
-                    if current_page == 1: # 如果是第一页就没有数据
+        total_items = response_data.get("count")
+        next_page_url = response_data.get("next")
+
+        if not current_page_items:
+            if current_page == 1:
                         logger.info("未找到满足条件的数据字段，或 API 返回空列表。")
-                    else: # 如果不是第一页，说明已经取完了所有数据
+            else:
                         logger.info(f"已获取所有数据字段，总共 {len(all_datafields_list)} 条。")
-                    break # 退出循环
+            break
 
                 all_datafields_list.extend(current_page_items)
                 logger.info(f"已获取 {len(current_page_items)} 条数据字段 (第 {current_page} 页)。累计: {len(all_datafields_list)} 条。")
 
-                # 判断是否还有下一页
-                if next_page_url: # 如果 API 直接提供了下一页的 URL
-                    current_page += 1 # 准备请求下一页
-                elif total_items is not None: # 如果 API 提供了总数
+        if next_page_url:
+            current_page += 1
+        elif total_items is not None:
                     if len(all_datafields_list) >= total_items:
                         logger.info(f"已获取所有 {total_items} 条数据字段。")
-                        break # 已获取全部数据
+                break
                     else:
-                        current_page += 1 # 准备请求下一页
-                else: # 如果既没有 next_page_url 也没有 total_items，且当前页有数据，则只能假设还有下一页
-                      # 这是一种不太理想的 API 设计，但需要处理。或者，如果当前页数据少于 page_size，也可认为结束。
+                current_page += 1
+        else:
                     if len(current_page_items) < page_size:
                         logger.info(f"当前页获取的数据条数 ({len(current_page_items)}) 小于请求的页面大小 ({page_size})，认为已获取所有数据。")
                         break
                     else:
                         current_page += 1
 
-                # 防止无限循环的额外检查 (例如，如果API分页逻辑有问题)
-                if current_page > 500: # 假设最多500页，避免意外的无限循环
+        if current_page > 500:
                     logger.warning("获取数据字段时，页数超过500页，可能存在问题，停止获取。")
                     break
 
             except requests.exceptions.RequestException as e:
-                logger.error(f"获取数据字段列表 (第 {current_page} 页) 时发生请求错误: {e}")
-                # 发生错误时，可以选择返回已获取的部分数据，或者返回空 DataFrame
+        logger.error(f"获取数据字段列表 (第 {current_page} 页) 时发生请求错误: {e}", exc_info=True) # Add exc_info
                 return pd.DataFrame(all_datafields_list) if all_datafields_list else pd.DataFrame()
-            except ValueError as e: # JSON 解析错误
-                logger.error(f"解析数据字段列表响应 (第 {current_page} 页) 时发生错误: {e}。响应内容: {response.text if 'response' in locals() else 'N/A'}")
+    except ValueError as e:
+        logger.error(f"解析数据字段列表响应 (第 {current_page} 页) 时发生错误: {e}。响应内容: {response.text if 'response' in locals() else 'N/A'}", exc_info=True) # Add exc_info
                 return pd.DataFrame(all_datafields_list) if all_datafields_list else pd.DataFrame()
-            except Exception as e:
-                logger.error(f"获取数据字段列表 (第 {current_page} 页) 时发生未预料的错误: {e}", exc_info=True)
+    except Exception as e: # Catch any other unexpected error during loop
+        logger.error(f"获取数据字段列表 (第 {current_page} 页) 时发生意外错误: {e}", exc_info=True)
+        # Return what has been gathered so far, or an empty DataFrame
                 return pd.DataFrame(all_datafields_list) if all_datafields_list else pd.DataFrame()
 
         if not all_datafields_list:

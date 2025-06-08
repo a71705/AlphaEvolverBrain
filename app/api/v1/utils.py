@@ -76,15 +76,15 @@ async def combine_alphas_api(
             alpha_expressions=alpha_expressions_to_combine,
             method=request_data.method
         )
-    except ValueError as ve: # combine_alphas 内部可能抛出 ValueError
-        logger.error(f"调用 combine_alphas 时发生配置或参数错误: {ve}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"组合Alpha时发生错误: {ve}")
-    except Exception as e:
-        logger.error(f"调用 combine_alphas 时发生未知错误: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"组合Alpha时发生内部错误: {e}")
+    except ValueError as ve:
+        logger.warning(f"调用 combine_alphas 时发生值错误: {ve}", exc_info=True) # Changed to warning as it's often client data related
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Alpha组合处理失败: {ve}") # 422 for unprocessable entity
+    except Exception as e: # Catches other unexpected errors from combine_alphas
+        logger.error(f"调用 combine_alphas 时发生意外内部错误: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="服务器内部发生错误，请联系管理员。")
 
-    if not combined_expression_str:
-        logger.warning(f"Alpha组合结果为空字符串，方法: {request_data.method}, 输入表达式数量: {len(alpha_expressions_to_combine)}")
+    if not combined_expression_str: # Should ideally be caught by exceptions in combine_alphas if it returns "" on error
+        logger.error(f"Alpha组合结果为空字符串，方法: {request_data.method}, 输入表达式数量: {len(alpha_expressions_to_combine)}") # Changed to error
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, # 或者 400
             detail="Alpha组合未能生成有效表达式 (可能由于输入或组合逻辑问题)。"
@@ -137,10 +137,14 @@ async def combine_alphas_api(
 
     except requests.exceptions.RequestException as req_err:
         logger.error(f"模拟组合Alpha '{combined_expression_str}' 时请求失败: {req_err}", exc_info=True)
-        sim_details_for_response = CombinedAlphaSimulatedData(status="FAILED", error_message=f"API请求失败: {req_err}")
-    except Exception as e: # 其他来自 brain_api 或内部逻辑的错误
-        logger.error(f"模拟组合Alpha '{combined_expression_str}' 时发生未知错误: {e}", exc_info=True)
-        sim_details_for_response = CombinedAlphaSimulatedData(status="FAILED", error_message=f"模拟过程中发生未知错误: {str(e)}") # 使用 str(e) 避免复杂对象
+        sim_details_for_response = CombinedAlphaSimulatedData(status="FAILED", error_message=f"API请求失败: {str(req_err)}") # str(req_err)
+    except HTTPException as http_exc: # If BrainApiSession raises HTTPException
+        logger.error(f"模拟组合Alpha '{combined_expression_str}' 时发生HTTPException: {http_exc.detail}", exc_info=True)
+        sim_details_for_response = CombinedAlphaSimulatedData(status="FAILED", error_message=f"模拟服务HTTP错误: {http_exc.detail}")
+        # Do not re-raise here, let it be part of the response
+    except Exception as e:
+        logger.error(f"模拟组合Alpha '{combined_expression_str}' 时发生意外错误: {e}", exc_info=True)
+        sim_details_for_response = CombinedAlphaSimulatedData(status="FAILED", error_message="模拟过程中发生服务器内部错误。") # Generic message
 
     # (可选) 保存这个组合出来的 Alpha 和它的模拟结果到数据库。本任务不实现保存。
     # new_alpha_id_str: Optional[str] = None
@@ -159,26 +163,35 @@ async def export_alpha_api(alpha_id_str: str = Path(..., description="要导出�
     使用 'alpha_id_str' 作为路径参数名，以明确其为字符串类型，后续转换为UUID。
     """
     try:
-        alpha_uuid = uuid.UUID(alpha_id_str)
-    except ValueError:
-        logger.warning(f"请求导出的Alpha ID '{alpha_id_str}' 不是有效的UUID格式。")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Alpha ID '{alpha_id_str}' 格式无效。")
+        try:
+            alpha_uuid = uuid.UUID(alpha_id_str)
+        except ValueError:
+            logger.warning(f"导出Alpha失败：提供的Alpha ID '{alpha_id_str}' 不是有效的UUID格式。", exc_info=True) # Add exc_info for context
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Alpha ID '{alpha_id_str}' 格式无效。")
 
-    alpha_db = db.query(AlphaModel).filter(AlphaModel.id == alpha_uuid).first()
+        alpha_db = db.query(AlphaModel).filter(AlphaModel.id == alpha_uuid).first()
 
-    if not alpha_db:
-        logger.warning(f"请求导出的Alpha ID '{alpha_uuid}' 在数据库中未找到。")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Alpha ID '{alpha_uuid}' 未找到。")
+        if not alpha_db:
+            logger.warning(f"导出Alpha失败：Alpha ID {alpha_uuid} 在数据库中未找到。")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Alpha ID {alpha_uuid} 未找到。")
 
-    logger.info(f"成功导出Alpha ID '{alpha_db.id}' 的数据。")
-    return AlphaExportResponse(
-        alpha_id=str(alpha_db.id),
-        expression=alpha_db.expression,
-        simulation_settings_json=alpha_db.simulation_settings_json,
-        experiment_id=str(alpha_db.experiment_id) if alpha_db.experiment_id else None,
-        created_at=alpha_db.created_at,
-        description=alpha_db.description
-    )
+        logger.info(f"成功导出Alpha ID '{alpha_db.id}' 的数据。")
+        return AlphaExportResponse(
+            alpha_id=str(alpha_db.id),
+            expression=alpha_db.expression,
+            simulation_settings_json=alpha_db.simulation_settings_json,
+            experiment_id=str(alpha_db.experiment_id) if alpha_db.experiment_id else None,
+            created_at=alpha_db.created_at,
+            description=alpha_db.description
+        )
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"导出Alpha {alpha_id_str} 时发生意外错误: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="服务器内部发生错误，请联系管理员。" # Standardized generic message
+        )
 
 # 需要在 app/api/v1/__init__.py 中注册这个 router
 # from fastapi import Path # 用于路径参数的更详细定义 (如果需要)

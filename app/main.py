@@ -9,6 +9,8 @@ from .api.v1 import api_router
 from .database import create_tables
 # 从 .core.logging_config 模块导入 configure_logging 函数，用于配置日志系统
 from .core.logging_config import configure_logging
+# 从 .core.notifications 模块导入 initialize_yagmail 函数 (DEV-032 新增)
+from .core.notifications import initialize_yagmail
 from rq import Queue
 from redis import Redis
 from .tasks import test_task # 导入我们创建的测试任务
@@ -27,16 +29,20 @@ async def startup_event():
     # 调用 configure_logging() 函数，配置应用范围的日志记录器。
     # 建议在其他启动任务之前配置日志，以便后续任务可以立即使用配置好的日志系统。
     configure_logging()
+    logger = logging.getLogger("main_startup") # 获取logger实例，确保在日志配置后获取
+    logger.info("应用程序启动中...")
 
-    # 调用 create_tables() 函数，创建在 app.models 中定义的数据库表。
-    # 如果表已存在，此操作通常不会产生影响。
-    create_tables()
+    logger.info("正在初始化数据库表...")
+    create_tables() # 创建数据库表
+    logger.info("数据库表初始化完成。")
 
-    # 获取根日志记录器，并记录一条信息表明应用已启动和服务配置完成。
-    # 这是为了验证日志系统是否按预期工作。
-    import logging
-    logger = logging.getLogger(__name__) # 使用 __name__ 获取当前模块的日志记录器
-    logger.info("FastAPI 应用启动完成，日志系统和数据库表已配置。")
+    logger.info("正在初始化邮件服务...")
+    initialize_yagmail() # 初始化邮件服务 (DEV-032 新增)
+    # 如果 initialize_yagmail 中有测试邮件发送，它会被调用（当前版本已注释掉自动测试邮件）
+    logger.info("邮件服务初始化流程完成 (具体状态请查看 core.notifications 日志)。")
+
+    logger.info("应用程序启动完成。")
+
 
 # --- 用于测试 RQ 任务提交的临时端点 ---
 # 注意：这个端点主要用于开发和测试目的。

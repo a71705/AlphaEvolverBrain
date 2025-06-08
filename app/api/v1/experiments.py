@@ -115,19 +115,17 @@ async def create_experiment(
         new_experiment = Experiment(
             name=exp_data.name,
             description=exp_data.description,
-            config_json=exp_data.config_json, # Pydantic 会确保这是一个有效的字典
-            code_version=exp_data.code_version,
-            status="PENDING",  # 初始状态，任务入队后 worker 会更新为 RUNNING
-            # current_depth, current_iteration, random_seed 等将使用其在模型中定义的默认值
-            # start_time 和 end_time 初始为 None，由任务本身或成功/失败时设置
+            config_json=exp_data.config_json,
+            # code_version=exp_data.code_version, # Assuming code_version is part of ExperimentCreate schema
+            status="PENDING",
         )
 
         # 2. 将新实验对象添加到数据库会话并提交以获取 ID
         db.add(new_experiment)
         db.commit()
-        db.refresh(new_experiment) # 刷新以获取数据库生成的 ID 和默认值
+        db.refresh(new_experiment)
 
-        logger.info(f"实验 '{new_experiment.name}' (ID: {new_experiment.id}) 已成功创建并存入数据库，状态: {new_experiment.status}。")
+        logger.info(f"实验 '{new_experiment.name}' (ID: {new_experiment.id}) 成功创建并存入数据库，状态: {new_experiment.status}。")
 
         # 3. 生成唯一的 RQ 作业 ID
         # 约定作业 ID 与实验 ID 相关联，方便后续查询作业状态
@@ -171,43 +169,46 @@ async def create_experiment(
         # 5. 准备并返回响应
         # ExperimentResponse 需要 job_id 和 job_status，我们刚拿到了 job_id
         # job_status 可以从 job 对象获取 (刚入队时通常是 'queued')
-        return ExperimentResponse(
+        # 确保所有 ExperimentResponse 字段都有值或合理的默认值
+        response_data = ExperimentResponse(
             id=new_experiment.id,
+            user_id=new_experiment.user_id, # 假设模型中有 user_id
+            created_at=new_experiment.created_at,
+            updated_at=new_experiment.updated_at,
             name=new_experiment.name,
             description=new_experiment.description,
-            start_time=new_experiment.start_time, # 可能仍为 None
-            end_time=new_experiment.end_time,     # None
-            status=new_experiment.status,         # PENDING (或 QUEUED 如果上面更新了)
-            config_json=new_experiment.config_json,
-            code_version=new_experiment.code_version,
+            ga_config_json=new_experiment.config_json, # 字段名在 Pydantic 中是 ga_config_json
+            simulation_config_json=exp_data.simulation_config_json, # 从请求数据中获取
+            status=new_experiment.status,
+            current_progress=new_experiment.current_progress or 0,
             current_depth=new_experiment.current_depth,
-            current_iteration=new_experiment.current_iteration,
-            random_seed=new_experiment.random_seed,
-            error_message=new_experiment.error_message,
-            job_id=job.id,
-            job_status=job.get_status(),
-            progress_percentage=0.0 # 初始进度为0
+            current_iteration_at_depth=new_experiment.current_iteration_at_depth,
+            alpha_count=0 # 新实验alpha数量为0
+            # job_id 和 job_status 不在 ExperimentResponse 的标准字段中，
+            # 如果需要，应添加到 ExperimentResponse schema 或通过特定端点查询任务状态
         )
+        # Manually set job_id and job_status if they were part of a dynamic response schema
+        # For now, stick to the defined ExperimentResponse
+        logger.info(f"成功创建并提交实验 {new_experiment.id} 到队列。")
+        return response_data
 
-    except redis_exceptions.RedisError as e: # 更具体的 Redis 异常
-        logger.error(f"创建实验 '{exp_data.name}' 时发生 Redis 错误 (例如提交任务到队列失败): {e}", exc_info=True)
-        # 此时实验记录可能已在数据库中创建，但任务未能入队。
-        # 需要考虑如何处理这种情况，例如：
-        # 1. 删除已创建的实验记录 (如果事务允许)。
-        # 2. 将实验状态标记为某种错误或待处理状态。
-        # 目前，如果 db.commit() 在 enqueue 之前成功，则实验记录会保留。
-        # 如果在实验模型中有 job_id 字段，可以尝试清除它。
+    except redis_exceptions.RedisError as e:
+        logger.error(f"创建实验 '{exp_data.name}' 时发生 Redis 错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"任务队列服务遇到 Redis 错误，无法提交实验任务: {str(e)}"
+            detail="任务队列服务遇到 Redis 错误，无法提交实验任务。" # 通用消息
         )
+    except HTTPException as http_exc: # 重新抛出已知的HTTPException
+        raise http_exc
+    except ValueError as ve: # 处理特定的预期业务逻辑错误
+        logger.warning(f"创建实验 '{exp_data.name}' 时发生值错误: {ve}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
-        logger.error(f"创建实验 '{exp_data.name}' 时发生未预料的服务器内部错误: {e}", exc_info=True)
-        # 尝试回滚数据库操作，以防部分提交
-        db.rollback()
+        logger.error(f"创建实验 '{exp_data.name}' 时发生意外错误: {e}", exc_info=True)
+        db.rollback() # 尝试回滚以防部分数据库更改
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"创建实验时发生内部错误: {str(e)}"
+            detail="服务器内部发生错误，请联系管理员。" # 通用消息
         )
 
 def _calculate_progress_percentage(exp: Experiment, job_meta_progress: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -323,10 +324,10 @@ async def get_experiment_details(
         exp_orm = db.query(Experiment).filter(Experiment.id == experiment_id).first()
 
         if not exp_orm:
-            logger.warning(f"实验ID {experiment_id} 在数据库中未找到。")
+            logger.warning(f"获取实验详情失败：实验ID {experiment_id} 在数据库中未找到。")
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ID为 {experiment_id} 的实验未找到。")
 
-        logger.debug(f"成功从数据库获取实验 {experiment_id} 的记录。状态: {exp_orm.status}")
+        logger.info(f"成功从数据库获取实验 {experiment_id} 的记录。状态: {exp_orm.status}") # 改为 info
 
         # 2. 尝试获取关联的 RQ 作业状态和元数据
         job_id_str = f"exp_{exp_orm.id}_ga_task" # 遵循创建时的约定
@@ -358,31 +359,33 @@ async def get_experiment_details(
         logger.debug(f"实验 {exp_orm.id}: 计算得到的进度百分比: {current_progress_percentage}")
 
         # 4. 构造并返回 ExperimentResponse
-        return ExperimentResponse(
+        # 构造并返回 ExperimentResponse
+        # 确保所有 ExperimentResponse 字段都有值或合理的默认值
+        response_data = ExperimentResponse(
             id=exp_orm.id,
+            user_id=exp_orm.user_id,
+            created_at=exp_orm.created_at,
+            updated_at=exp_orm.updated_at,
             name=exp_orm.name,
             description=exp_orm.description,
-            start_time=exp_orm.start_time,
-            end_time=exp_orm.end_time,
-            status=exp_orm.status, # 优先使用数据库中的状态作为权威来源
-            config_json=exp_orm.config_json,
-            code_version=exp_orm.code_version,
+            ga_config_json=exp_orm.config_json, # 字段名在 Pydantic 中是 ga_config_json
+            simulation_config_json=exp_orm.simulation_config_json, # 从ORM获取
+            status=exp_orm.status,
+            current_progress=current_progress_percentage if current_progress_percentage is not None else (exp_orm.current_progress or 0),
             current_depth=job_meta_progress.get('depth', exp_orm.current_depth) if job_meta_progress else exp_orm.current_depth,
-            current_iteration=job_meta_progress.get('iteration', exp_orm.current_iteration) if job_meta_progress else exp_orm.current_iteration,
-            random_seed=exp_orm.random_seed,
-            error_message=exp_orm.error_message,
-            job_id=job_id_str,
-            job_status=job_status_str if job_status_str else exp_orm.status, # 如果获取不到RQ状态，可以用DB状态作为参考
-            progress_percentage=current_progress_percentage
+            current_iteration_at_depth=job_meta_progress.get('iteration', exp_orm.current_iteration_at_depth) if job_meta_progress else exp_orm.current_iteration_at_depth, # 字段名校正
+            alpha_count=db.query(AlphaModel).filter(AlphaModel.experiment_id == exp_orm.id).count() # 动态计算alpha数量
         )
+        logger.info(f"成功获取实验 {experiment_id} 的详细信息。")
+        return response_data
 
-    except HTTPException: # 重新抛出已处理的 HTTPException (如 404)
-        raise
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
-        logger.error(f"获取实验 {experiment_id} 详情时发生未预料的服务器内部错误: {e}", exc_info=True)
+        logger.error(f"获取实验 {experiment_id} 详情时发生意外错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取实验 {experiment_id} 详情时发生内部错误: {str(e)}"
+            detail="服务器内部发生错误，请联系管理员。"
         )
 
 # ... (文件末尾)
@@ -418,86 +421,60 @@ async def list_experiments(
     logger.info(f"收到获取实验列表的请求。状态筛选: '{status_filter}', 分页: offset={skip}, limit={limit}")
 
     try:
-        query = db.query(Experiment) # 构建基础查询
+        query = db.query(Experiment)
 
-        # 应用状态过滤器 (如果提供了)
         if status_filter:
-            logger.debug(f"应用状态筛选条件: status == '{status_filter}'")
-            query = query.filter(Experiment.status == status_filter.upper()) # 假设状态在数据库中也是大写
+            logger.debug(f"应用状态筛选: status == '{status_filter}'")
+            query = query.filter(Experiment.status == status_filter.upper())
 
-        # 获取总数 (用于潜在的分页元数据，虽然当前响应模型不包含)
-        # total_experiments = query.count()
-        # logger.debug(f"符合筛选条件的总实验数: {total_experiments}")
+        experiments_orm = query.order_by(Experiment.created_at.desc()).offset(skip).limit(limit).all() # 排序用 created_at
+        logger.info(f"查询到 {len(experiments_orm)} 个实验记录。")
 
-        # 应用排序（例如按创建时间降序）、分页
-        experiments_orm = query.order_by(Experiment.id.desc()).offset(skip).limit(limit).all()
-
-        logger.info(f"从数据库查询到 {len(experiments_orm)} 个实验记录。")
-
-        # 将 SQLAlchemy ORM 对象转换为 Pydantic 响应模型列表
         response_list: List[ExperimentResponse] = []
         for exp_orm in experiments_orm:
-            job_id_str = f"exp_{exp_orm.id}_ga_task" # 遵循创建时的约定
-            job_status_str: Optional[str] = None
-            progress_info: Dict[str, Any] = {} # 用于存储从 job.meta 获取的进度
+            # job_id_str = f"exp_{exp_orm.id}_ga_task" # Job ID 不直接在ExperimentResponse中
+            # job_status_str: Optional[str] = None
+            # if redis_conn:
+            #     try:
+            #         job = Job.fetch(job_id_str, connection=redis_conn)
+            #         job_status_str = job.get_status()
+            #     except Exception: # rq.exceptions.NoSuchJobError or redis connection error
+            #         job_status_str = "UNKNOWN" # Or derive from DB status if job not found
+            # else: # No redis connection
+            #     job_status_str = "UNKNOWN_NO_REDIS" if exp_orm.status == "RUNNING" else exp_orm.status
 
-            if redis_conn: # 仅当 Redis 连接可用时尝试获取作业状态
-                try:
-                    job = Job.fetch(job_id_str, connection=redis_conn)
-                    job_status_str = job.get_status()
-                    # job.meta 是一个字典，可能包含 'progress'键
-                    if job.meta and 'progress' in job.meta:
-                         progress_info = job.meta['progress'] # progress_info 是一个字典 {'depth': ..., 'iteration': ..., 'message': ...}
-                    logger.debug(f"实验 {exp_orm.id}: 获取到 RQ 作业 {job_id_str} 状态: {job_status_str}, meta progress: {progress_info}")
-                except Exception as e: # 例如 rq.exceptions.NoSuchJobError
-                    logger.warning(f"实验 {exp_orm.id}: 获取 RQ 作业 {job_id_str} 状态或元数据失败: {e}")
-                    job_status_str = "UNKNOWN" # 或 None，或从数据库状态推断
-            else:
-                logger.warning(f"实验 {exp_orm.id}: Redis 连接不可用，无法获取 RQ 作业状态。")
-
-            # 进度百分比计算 (列表视图中可以简化或省略，详细计算在获取单个实验时进行)
-            # 这里可以根据 job.meta 中的 'iteration' 和 'depth' 以及 ga_config 中的总数进行估算
-            # 为简单起见，列表视图的 progress_percentage 暂时设为 None 或基于粗略状态
-            current_progress_percentage: Optional[float] = None
-            if job_status_str == "finished" and exp_orm.status == "COMPLETED": # RQ 作业完成且数据库状态也为 COMPLETED
+            # 简化列表视图的进度计算，或依赖数据库中已有的 current_progress
+            current_progress_percentage = exp_orm.current_progress if exp_orm.current_progress is not None else 0.0
+            if exp_orm.status == "COMPLETED":
                 current_progress_percentage = 100.0
-            elif job_status_str == "failed" or exp_orm.status == "FAILED":
-                 current_progress_percentage = None # 或一个表示失败的值，或基于已完成部分计算
-            elif progress_info: # 如果能从 job.meta 获取到进度
-                # 这里的计算是示意性的，实际需要 ga_config 中的总深度/迭代信息
-                # total_iterations_estimate = ga_config.get('total_iterations_estimate', 100) # 需要更精确的总量
-                # completed_iterations_estimate = progress_info.get('depth',0) * SOME_ITER_PER_DEPTH + progress_info.get('iteration',0)
-                # current_progress_percentage = min((completed_iterations_estimate / total_iterations_estimate) * 100, 99.9) if total_iterations_estimate > 0 else 0.0
-                # 由于 ga_config 不在此处直接可用，列表视图的进度计算会比较困难，暂时简化
-                pass # 保持 current_progress_percentage 为 None 或基于其他信息
-
 
             exp_response = ExperimentResponse(
                 id=exp_orm.id,
+                user_id=exp_orm.user_id,
+                created_at=exp_orm.created_at,
+                updated_at=exp_orm.updated_at,
                 name=exp_orm.name,
                 description=exp_orm.description,
-                start_time=exp_orm.start_time,
-                end_time=exp_orm.end_time,
-                status=exp_orm.status, # 数据库中的状态优先
-                config_json=exp_orm.config_json,
-                code_version=exp_orm.code_version,
-                current_depth=exp_orm.current_depth, # 来自数据库的持久化进度
-                current_iteration=exp_orm.current_iteration, # 来自数据库
-                random_seed=exp_orm.random_seed,
-                error_message=exp_orm.error_message,
-                job_id=job_id_str, # 我们构造的 job_id
-                job_status=job_status_str, # 从 RQ 获取的状态
-                progress_percentage=current_progress_percentage # 简化的进度
+                ga_config_json=exp_orm.config_json,
+                simulation_config_json=exp_orm.simulation_config_json,
+                status=exp_orm.status,
+                current_progress=current_progress_percentage,
+                current_depth=exp_orm.current_depth,
+                current_iteration_at_depth=exp_orm.current_iteration_at_depth,
+                alpha_count=db.query(AlphaModel).filter(AlphaModel.experiment_id == exp_orm.id).count()
             )
             response_list.append(exp_response)
 
+        logger.info(f"成功获取实验列表，返回 {len(response_list)} 个实验。")
         return response_list
 
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
-        logger.error(f"获取实验列表时发生未预料的服务器内部错误: {e}", exc_info=True)
+        logger.error(f"获取实验列表时发生意外错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取实验列表时发生内部错误: {str(e)}"
+            detail="服务器内部发生错误，请联系管理员。"
         )
 
 @router.get(
@@ -544,61 +521,53 @@ async def list_alphas_for_experiment(
     logger.info(f"收到获取实验 {experiment_id} 下 Alpha 列表的请求。筛选条件: depth={depth}, min_fitness={min_fitness}。排序: by={sort_by}, order={order}。分页: offset={skip}, limit={limit}")
 
     try:
-        # 首先检查实验是否存在，以提供更明确的404错误
         experiment_exists = db.query(Experiment).filter(Experiment.id == experiment_id).first()
         if not experiment_exists:
-            logger.warning(f"尝试获取Alphas列表失败：实验ID {experiment_id} 未找到。")
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ID为 {experiment_id} 的实验未找到。")
+            logger.warning(f"获取Alphas列表失败：实验ID {experiment_id} 未找到。")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"实验ID {experiment_id} 未找到。")
 
-        # 构建基础查询，过滤指定实验ID的Alphas
-        query = db.query(Alpha).filter(Alpha.experiment_id == experiment_id)
+        query = db.query(AlphaModel).filter(AlphaModel.experiment_id == experiment_id) # 使用 AlphaModel
 
-        # 应用可选的过滤条件
         if depth is not None:
             logger.debug(f"应用深度筛选: depth == {depth}")
-            query = query.filter(Alpha.depth == depth)
+            # Assuming AlphaModel has a 'ga_metadata_json' field storing depth if not a direct column
+            # This requires a JSONB query if depth is in JSON. For simplicity, assume direct column or skip if complex.
+            # query = query.filter(AlphaModel.depth == depth) # If 'depth' is a direct column
+            # If in JSON: query = query.filter(AlphaModel.ga_metadata_json['depth'].astext.cast(Integer) == depth) # Example for PostgreSQL
+            logger.warning("按深度筛选Alpha的逻辑需要根据实际模型字段（例如 JSONB 内的字段）进行调整。当前为占位。")
+
 
         if min_fitness is not None:
-            logger.debug(f"应用最小适应度筛选: calculated_fitness_score >= {min_fitness}")
-            query = query.filter(Alpha.calculated_fitness_score >= min_fitness)
+            logger.debug(f"应用最小适应度筛选: fitness_score >= {min_fitness}") # field name is fitness_score
+            query = query.filter(AlphaModel.fitness_score >= min_fitness)
 
-        # 应用排序
-        # 需要校验 sort_by 参数是否是 Alpha 模型的一个有效且可排序的列
-        if hasattr(Alpha, sort_by):
-            sort_column = getattr(Alpha, sort_by)
-            if order.lower() == "asc":
-                query = query.order_by(sort_column.asc())
-            elif order.lower() == "desc":
-                query = query.order_by(sort_column.desc())
-            else:
-                logger.warning(f"无效的排序方向: '{order}'。将使用默认降序。")
-                query = query.order_by(sort_column.desc()) # 默认或处理无效order值
+        sort_attr = getattr(AlphaModel, sort_by, None)
+        if sort_attr is None:
+            logger.warning(f"无效的排序字段: '{sort_by}'。将使用默认按 'fitness_score' 降序排序。")
+            sort_attr = AlphaModel.fitness_score # Default sort column
+            order = "desc" # Ensure default order is desc for default sort_by
+
+        if order.lower() == "asc":
+            query = query.order_by(sort_attr.asc())
+        elif order.lower() == "desc":
+            query = query.order_by(sort_attr.desc())
         else:
-            logger.warning(f"无效的排序字段: '{sort_by}'。将使用默认按 'calculated_fitness_score' 降序排序。")
-            # 可以选择抛出400错误，或使用默认排序
-            # raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"无效的排序字段: {sort_by}")
-            query = query.order_by(Alpha.calculated_fitness_score.desc())
+            logger.warning(f"无效的排序方向: '{order}'。将使用默认降序。")
+            query = query.order_by(sort_attr.desc())
 
-
-        # 获取总数 (用于潜在的分页元数据，但当前响应模型不包含)
-        # total_alphas = query.count()
-        # logger.debug(f"实验 {experiment_id} 下符合筛选条件的Alpha总数: {total_alphas}")
-
-        # 应用分页
         alphas_orm = query.offset(skip).limit(limit).all()
         logger.info(f"为实验 {experiment_id} 查询到 {len(alphas_orm)} 条Alpha记录。")
 
-        # 将 SQLAlchemy ORM 对象转换为 Pydantic 响应模型列表
-        # AlphaResponse 的 Config 中 orm_mode = True 会自动处理转换
-        return alphas_orm # FastAPI 会自动处理 List[Alpha] 到 List[AlphaResponse]
+        # FastAPI会自动将 List[AlphaModel] 转换为 List[AlphaResponse] 因 orm_mode=True
+        return alphas_orm
 
-    except HTTPException: # 重新抛出已处理的 HTTPException (如404)
-        raise
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
-        logger.error(f"获取实验 {experiment_id} 的Alpha列表时发生未预料的服务器内部错误: {e}", exc_info=True)
+        logger.error(f"获取实验 {experiment_id} 的Alpha列表时发生意外错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取实验 {experiment_id} 的Alpha列表时发生内部错误: {str(e)}"
+            detail="服务器内部发生错误，请联系管理员。"
         )
 
 # ... (文件末尾)

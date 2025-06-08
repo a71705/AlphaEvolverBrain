@@ -213,18 +213,14 @@ def tree_to_alpha(tree: Node) -> str:
     expression_str = _recursive_tree_to_alpha(tree)
 
     if not expression_str:
-        logger.warning(f"树转换为 Alpha 表达式的结果为空字符串。可能原因：树为空、结构无效或包含未知节点。输入树: {tree!r}")
-        # !r 用于获取 repr 表示，避免过长的日志
-
-    logger.info(f"树成功转换为 Alpha 表达式: '{expression_str}'") # 记录生成的表达式
+        logger.warning(f"树转换为 Alpha 表达式的结果为空字符串。输入树: {tree!r}", exc_info=False) # No need for exc_info if it's just empty
+    else:
+        logger.info(f"树成功转换为 Alpha 表达式: '{expression_str}'")
 
     # 在返回之前进行轻量级语法验证
-    if not _validate_alpha_syntax(expression_str): # _validate_alpha_syntax defined in DEV-025
+    if expression_str and not _validate_alpha_syntax(expression_str): # Only validate if not empty
         logger.warning(f"生成的 Alpha 表达式 '{expression_str}' 未通过轻量级语法验证。")
-        # 根据策略，可以选择返回空字符串，或者让调用者处理带有警告的表达式
-        # return "" # 如果验证失败则返回空字符串
-        # 或者，如果希望流程继续但带有标记，可以考虑其他方式
-        # 目前，仅记录警告，并返回表达式。后续流程（如WQB实际模拟）会进行更严格的验证。
+        # Depending on strictness, could return "" or raise an error. For now, return as is with warning.
 
     return expression_str
 
@@ -387,11 +383,11 @@ def alpha_to_tree(expression_str: str) -> Optional[Node]:
         logger.info(f"表达式 '{expression_str}' 成功转换为树。根节点: {tree_root!r}")
         return tree_root
 
-    except ValueError as e: # 捕获来自 parse_expression 或 _build_tree_from_tokens 的语法/词法错误
-        logger.error(f"解析表达式 '{expression_str}' 时发生错误: {e}")
+    except ValueError as ve:
+        logger.warning(f"解析表达式 '{expression_str}' 时发生值错误 (可能语法无效): {ve}", exc_info=True) # Log as warning, could be bad input
         return None
-    except Exception as e: # 捕获其他意外错误
-        logger.error(f"解析表达式 '{expression_str}' 时发生未预料的系统错误: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"解析表达式 '{expression_str}' 时发生意外错误: {e}", exc_info=True)
         return None
 
 # ... (文件末尾)
@@ -455,7 +451,7 @@ def fitness_fun(Data: pd.DataFrame, n: int) -> List[str]: # List 来自 typing
             else: # std_return is None or NaN
                 sharpe_str = "sharpe_ratio:波动无法计算"
         except Exception as e:
-            logger.error(f"计算夏普比率时出错: {e}")
+            logger.error(f"计算夏普比率时出错: {e}", exc_info=True) # Add exc_info
             sharpe_str = "sharpe_ratio:计算错误"
 
     # 示例2：计算总收益率的字符串表示
@@ -477,7 +473,7 @@ def fitness_fun(Data: pd.DataFrame, n: int) -> List[str]: # List 来自 typing
             else:
                 total_return_str = "total_return:无数据计算" # Should not happen if Data is not empty
         except Exception as e:
-            logger.error(f"计算总收益率时出错: {e}")
+            logger.error(f"计算总收益率时出错: {e}", exc_info=True) # Add exc_info
             total_return_str = "total_return:计算错误"
 
     # 示例3：一个基于参数 n 的简单指标 (纯粹示意)
@@ -492,7 +488,7 @@ def fitness_fun(Data: pd.DataFrame, n: int) -> List[str]: # List 来自 typing
             alpha_val = (Data[returns_col] - Data[benchmark_returns_col]).mean() * annualization_factor
             results_list.append(f"alpha_vs_benchmark:{alpha_val:.4f}")
         except Exception as e:
-            logger.warning(f"计算相对基准Alpha时出错: {e}")
+            logger.warning(f"计算相对基准Alpha时出错: {e}", exc_info=True) # Add exc_info
             results_list.append("alpha_vs_benchmark:计算错误")
 
     logger.info(f"fitness_fun (示意性实现) 计算完成，结果: {results_list}")
@@ -632,9 +628,15 @@ def mutate_random_node(
         # 如果 depth_one_trees 由于列表为空等原因失败，则创建一个简单的终端节点作为备用
         logger.error(f"mutate_random_node: 生成新子树时出错 ({e})。将使用随机终端值作为备用。")
         if not terminal_vals:
-            # 这种情况非常严重，无法生成备用终端
+            logger.critical("mutate_random_node: 终端值列表 (terminal_vals) 为空，无法生成备用变异节点。", exc_info=True) # Critical error
             raise ValueError("mutate_random_node: 终端值列表 (terminal_vals) 为空，无法生成备用变异节点。") from e
         new_subtree_root = Node(random.choice(terminal_vals))
+    except Exception as e_main: # Catch any other error during new_subtree generation
+        logger.error(f"mutate_random_node: 生成新替换子树时发生未知错误: {e_main}", exc_info=True)
+        if not terminal_vals: # Should not happen if above check is done.
+             logger.critical("mutate_random_node: 终端值列表 (terminal_vals) 为空，无法生成备用变异节点。", exc_info=True)
+             raise ValueError("mutate_random_node: 终端值列表 (terminal_vals) 为空，无法生成备用变异节点。") from e_main
+        new_subtree_root = Node(random.choice(terminal_vals)) # Fallback to simplest node
 
     # logger.debug(f"mutate_random_node: 生成的用于替换的新子树: {new_subtree_root!r}")
 
@@ -721,6 +723,13 @@ def crossover(parent1: Node, parent2: Node) -> tuple[Node, Node]:
     # 对于子树交换，只要确保父节点仍然是合法的操作符即可。
 
     # logger.info(f"crossover: 交叉完成。 Child1: {child1!r}, Child2: {child2!r}")
+
+    # 确保返回的子节点不为None，如果copy_tree可能返回None（理论上不应发生若parent有效）
+    if child1 is None or child2 is None:
+        logger.error(f"交叉操作后至少一个子代为 None (不应发生若父代有效)。Child1: {child1}, Child2: {child2}", exc_info=True)
+        # Fallback: return copies of parents if crossover results in None children
+        return copy_tree(parent1), copy_tree(parent2)
+
     return child1, child2
 
 # ... (文件末尾) ...
@@ -853,9 +862,10 @@ def _get_dynamic_terminal_values(
         )
     except Exception as e:
         logger.error(f"调用 Brain API get_datafields 失败: {e}", exc_info=True)
-        return DEFAULT_TERMINAL_VALUES # API 调用失败，返回默认列表
+        logger.warning("由于API错误，_get_dynamic_terminal_values 将返回默认终端值列表。")
+        return DEFAULT_TERMINAL_VALUES
 
-    if all_fields_df is None or all_fields_df.empty:
+    if all_fields_df is None or all_fields_df.empty: # Check after try-except
         logger.warning("从 Brain API 获取的数据字段列表为空或为None。将使用默认终端值列表。")
         return DEFAULT_TERMINAL_VALUES
 
@@ -1067,43 +1077,70 @@ def best_d1_alphas(
                 population.append(tree)
             else:
                 logger.debug(f"生成的初始树深度 {current_depth} (>{max_depth}) 或节点数 {current_nodes} (>{max_nodes}) 超出约束，丢弃。")
-        except ValueError as e: # 可能由 depth_one_trees 抛出 (例如操作符列表为空)
-            logger.error(f"生成初始树时发生错误: {e}。尝试继续...")
+    except ValueError as e:
+        logger.warning(f"生成初始树时发生值错误: {e}。尝试继续...", exc_info=True) # Add exc_info, log as warning
+    except Exception as e_general: # Catch any other unexpected error during tree generation
+        logger.error(f"生成初始树时发生意外错误: {e_general}。尝试继续...", exc_info=True)
         attempts += 1
 
-    if len(population) < population_size:
-        logger.warning(f"实验 {experiment_id}: 未能生成足够的符合约束的初始种群 (实际: {len(population)}, 预期: {population_size})。")
-        if not population: # 如果一个都没生成成功
-             raise RuntimeError(f"实验 {experiment_id}: 无法生成任何有效的初始种群个体。请检查配置和终端/操作符列表。")
+    if len(population) < population_size and attempts >= population_size * max_attempts_per_individual:
+        logger.warning(f"实验 {experiment_id}: 达到最大尝试次数后，未能生成足够的符合约束的初始种群 (实际: {len(population)}, 预期: {population_size})。")
+        if not population:
+             logger.critical(f"实验 {experiment_id}: 无法生成任何有效的初始种群个体。请检查配置和终端/操作符列表。", exc_info=True)
+             raise RuntimeError(f"实验 {experiment_id}: 无法生成任何有效的初始种群个体。")
+    elif len(population) < population_size:
+         logger.warning(f"实验 {experiment_id}: 最终生成的初始种群数量 ({len(population)}) 少于预期 ({population_size}) 但仍将继续。")
 
 
     logger.info(f"实验 {experiment_id}: 已生成初始种群，数量: {len(population)}，使用动态终端值并应用了复杂性约束。")
 
     # --- 后续选择、交叉、变异、评估等逻辑 (占位符) ---
-    # for iteration in range(total_iterations_this_depth):
-    #    evaluated_population = []
-    #    for individual_tree in population:
-    #        alpha_expr = tree_to_alpha(individual_tree)
-    #        if not alpha_expr: continue # 跳过无效表达式
-    #        # 调用 brain_api.simulate_alpha, 获取 fitness (此处为伪代码)
-    #        # fitness_score = simulate_and_get_fitness(alpha_expr, brain_api, db, experiment_id, ga_config)
-    #        # evaluated_population.append({"tree": individual_tree, "fitness": fitness_score})
+    # 实际的GA循环会在这里进行：
+    # for iteration_num in range(total_iterations_this_depth):
+    #     logger.info(f"实验 {experiment_id}, 深度 {current_depth_for_ga}, 开始迭代 {iteration_num + 1}/{total_iterations_this_depth}")
+    #     evaluated_population = []
+    #     for i, individual_tree in enumerate(population):
+    #         alpha_expression = tree_to_alpha(individual_tree)
+    #         if not alpha_expression:
+    #             logger.warning(f"个体 {i} 生成无效表达式，跳过。树: {individual_tree!r}")
+    #             continue
     #
-    #    # selected_population = selection_method(evaluated_population, ...)
-    #    # next_generation = []
-    #    # while len(next_generation) < population_size:
-    #    #     parent1, parent2 = select_parents(selected_population)
-    #    #     child1, child2 = crossover(parent1, parent2, ga_config, max_depth, max_nodes) # crossover需传入约束
-    #    #     child1 = mutate_random_node(child1, ..., ga_config, max_depth, max_nodes) # mutate也需传入约束
-    #    #     next_generation.extend([c1, c2] if c1 and c2 else []) # 只添加有效子代
-    #    # population = next_generation[:population_size]
-    #    logger.info(f"迭代 {iteration + 1}/{total_iterations_this_depth} 完成 (占位符)。")
+    #         # *** Alpha 模拟与错误记录示例 ***
+    #         # alpha_model_instance = AlphaModel(expression=alpha_expression, experiment_id=experiment_id, ...)
+    #         # db.add(alpha_model_instance)
+    #         # db.commit() # 保存以获取ID
+    #         # db.refresh(alpha_model_instance)
+    #         #
+    #         # try:
+    #         #     # simulate_data = {"expression": alpha_expression, "settings": ga_config.get("simulation_settings")}
+    #         #     # sim_results = brain_api.run_simulation_and_get_results(simulate_data) # 假设此方法存在
+    #         #     # alpha_model_instance.is_stats_json = sim_results.get('is_stats')
+    #         #     # alpha_model_instance.fitness_score = calculate_fitness(sim_results) # 假设有此函数
+    #         #     # alpha_model_instance.simulation_status = "COMPLETED"
+    #         #     # if sim_results.get('error_message'):
+    #         #     #     alpha_model_instance.simulation_status = "FAILED"
+    #         #     #     alpha_model_instance.simulation_error_message = sim_results['error_message']
+    #         #     #     logger.warning(f"Alpha {alpha_model_instance.id} 模拟失败: {sim_results['error_message']}")
+    #         # except Exception as sim_exc:
+    #         #     logger.error(f"Alpha {alpha_model_instance.id} 模拟过程中发生严重错误: {sim_exc}", exc_info=True)
+    #         #     alpha_model_instance.simulation_status = "FAILED"
+    #         #     alpha_model_instance.simulation_error_message = f"Task-level error during simulation: {type(sim_exc).__name__} - {str(sim_exc)}"
+    #         # finally:
+    #         #     alpha_model_instance.simulated_at = datetime.now(timezone.utc)
+    #         #     db.commit()
+    #         #
+    #         # evaluated_population.append(alpha_model_instance) # 或包含树和适应度的字典
+    #
+    #     # population = selection_crossover_mutation(evaluated_population, ga_config, dynamic_terminal_values, ...)
+    #     # _report_progress(job, db, experiment_id, current_depth_for_ga, iteration_num + 1, "迭代完成")
+    #     logger.info(f"迭代 {iteration_num + 1}/{total_iterations_this_depth} 完成 (占位符)。")
 
 
     # --- 以下为原占位符逻辑的返回 ---
     time.sleep(1)
     logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d1_alphas (占位符逻辑部分) 完成。")
 
+    # 实际应返回处理过的Alpha列表或统计信息
     return [
         {"expression": f"placeholder_d1_exp{experiment_id}_alpha_1", "fitness": 0.5, "details": "来自best_d1_alphas占位符"},
         {"expression": f"placeholder_d1_exp{experiment_id}_alpha_2", "fitness": 0.4, "details": "来自best_d1_alphas占位符"}

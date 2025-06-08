@@ -99,8 +99,7 @@ async def get_datasets_api(
     )
 
     try:
-        # 调用 BrainApiSession 的 get_datasets 方法
-        # 该方法已使用 @lru_cache 装饰，会自动处理缓存
+        logger.debug(f"调用 brain_api.get_datasets (instrument_type='{instrument_type}', region='{region}', delay={delay}, universe='{universe}')")
         datasets_df = await asyncio.to_thread(
             brain_api.get_datasets,
             instrument_type=instrument_type,
@@ -108,30 +107,25 @@ async def get_datasets_api(
             delay=delay,
             universe=universe
         )
-        # get_datasets 是一个同步方法，但在异步的 FastAPI 端点中调用它时，
-        # 最好使用 asyncio.to_thread 将其包装起来，以避免阻塞事件循环。
-        # (如果 get_datasets 内部的 _request_with_retry 已经是异步的，则不需要 to_thread)
-        # 检查我们 DEV-007 中 get_datasets 的实现：它是同步的 (因为它使用了同步的 requests 库)。
-        # 因此，使用 asyncio.to_thread 是一个好实践。
 
         if datasets_df is None or datasets_df.empty:
-            logger.info("未从 Brain API 获取到数据集信息，或返回为空。")
-            return [] # 返回空列表
+            logger.info("Brain API 未返回数据集信息，或结果为空。")
+            return []
 
-        # 将 Pandas DataFrame 转换为字典列表，Pydantic 会自动转换为 List[DataSetResponse]
         response_data = datasets_df.to_dict(orient="records")
         logger.info(f"成功获取并格式化 {len(response_data)} 个数据集。")
         return response_data
 
-    except HTTPException: # 重新抛出由 get_brain_session 可能引发的 HTTPException
-        raise
+    except HTTPException as http_exc:
+        raise http_exc
+    except ValueError as ve: # 假设 BrainApiSession 或数据处理可能抛出特定 ValueError
+        logger.warning(f"获取数据集处理过程中发生值错误: {ve}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
-        # 捕获调用 brain_api.get_datasets 时可能发生的其他所有异常
-        # 例如，如果 DataFrame 转换失败，或者 _request_with_retry 抛出了未被 get_brain_session 捕获的异常
-        logger.error(f"获取数据集时发生错误: {e}", exc_info=True)
+        logger.error(f"获取数据集时发生意外错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取数据集信息时发生内部错误: {str(e)}"
+            detail="服务器内部发生错误，请联系管理员。" # 标准化通用消息
         )
 
 @router.get(
@@ -182,8 +176,10 @@ async def get_datafields_api(
     )
 
     try:
-        # 调用 BrainApiSession 的 get_datafields 方法
-        # 该方法已使用 @lru_cache 装饰并包含内部分页逻辑
+        logger.debug(
+            f"调用 brain_api.get_datafields (instrument_type='{instrument_type}', region='{region}', delay={delay}, "
+            f"universe='{universe}', dataset_id='{dataset_id}', search='{search}')"
+        )
         datafields_df = await asyncio.to_thread(
             brain_api.get_datafields,
             instrument_type=instrument_type,
@@ -192,26 +188,26 @@ async def get_datafields_api(
             universe=universe,
             dataset_id=dataset_id,
             search=search
-            # page_size 参数由 get_datafields 方法内部默认或可配置，此处不直接传入
         )
-        # get_datafields 是同步的，使用 asyncio.to_thread 运行
 
         if datafields_df is None or datafields_df.empty:
-            logger.info("未从 Brain API 获取到数据字段信息，或返回为空。")
+            logger.info("Brain API 未返回数据字段信息，或结果为空。")
             return []
 
-        # 将 Pandas DataFrame 转换为字典列表
         response_data = datafields_df.to_dict(orient="records")
         logger.info(f"成功获取并格式化 {len(response_data)} 个数据字段。")
         return response_data
 
-    except HTTPException: # 重新抛出由 get_brain_session 可能引发的 HTTPException
-        raise
+    except HTTPException as http_exc:
+        raise http_exc
+    except ValueError as ve:
+        logger.warning(f"获取数据字段处理过程中发生值错误: {ve}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
-        logger.error(f"获取数据字段时发生错误: {e}", exc_info=True)
+        logger.error(f"获取数据字段时发生意外错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取数据字段信息时发生内部错误: {str(e)}"
+            detail="服务器内部发生错误，请联系管理员。" # 标准化通用消息
         )
 
 # ... (文件末尾)

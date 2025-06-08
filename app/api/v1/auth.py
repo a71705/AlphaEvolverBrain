@@ -155,12 +155,55 @@ async def login_api(
             detail="认证服务连接失败，请稍后重试。",
         )
 
+    except HTTPException as http_exc: # 首先重新抛出已知的HTTPException (如果BrainApiSession或内部逻辑抛出)
+        raise http_exc
+    except ValueError as ve:
+        # 捕获由 BrainApiSession._authenticate 抛出的关于 Persona 认证的 ValueError
+        if "Persona 认证场景被检测到" in str(ve):
+            logger.warning(f"用户 {credentials.email} 登录失败：需要 Persona 认证。详情: {ve}", exc_info=True) # Added exc_info
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"认证失败：需要进行生物特征识别或多因素认证。请检查您的WorldQuant BRAIN账户。", # Slightly more user-friendly
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        else:
+            # 其他类型的 ValueError
+            logger.error(f"用户 {credentials.email} 登录时发生值错误: {ve}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="登录请求处理失败，无效的输入或内部值错误。", # Generic message
+            )
+    except requests.exceptions.HTTPError as http_err:
+        log_message = f"用户 {credentials.email} 登录时 Brain API 请求发生 HTTP 错误." # Generic log start
+        if http_err.response is not None:
+            log_message += f" 状态码: {http_err.response.status_code}, 响应体 (部分): {http_err.response.text[:200]}"
+        logger.error(log_message, exc_info=True)
+
+        status_code_to_raise = status.HTTP_503_SERVICE_UNAVAILABLE
+        detail_message_to_raise = "认证服务暂时不可用或遇到错误，请稍后重试。"
+        headers_to_raise = None
+        if http_err.response is not None and http_err.response.status_code == 401:
+            status_code_to_raise = status.HTTP_401_UNAUTHORIZED
+            detail_message_to_raise = "提供的凭据无效或认证失败。" # More specific for 401
+            headers_to_raise = {"WWW-Authenticate": "Bearer"}
+
+        raise HTTPException(
+            status_code=status_code_to_raise,
+            detail=detail_message_to_raise,
+            headers=headers_to_raise,
+        )
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"用户 {credentials.email} 登录时 Brain API 请求发生连接错误: {req_err}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="认证服务连接失败，请检查网络或稍后重试。",
+        )
     except Exception as e:
         # 捕获所有其他未预料的异常
-        logger.error(f"用户 {credentials.email} 登录时发生未预料的服务器内部错误: {e}", exc_info=True)
+        logger.error(f"用户 {credentials.email} 登录时发生意外的服务器内部错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="登录服务发生内部错误，请联系管理员。",
+            detail="服务器内部发生错误，请联系管理员。", # Standard generic message
         )
 
 # ... (文件末尾)

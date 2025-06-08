@@ -32,18 +32,24 @@ async def get_api_usage_status(
     # usage_stats = brain_api.get_api_usage_stats() # 假设的方法
     # calls_today = usage_stats.get("calls_today", 0)
     # ... 其他统计信息 ...
-
-    logger.info("请求API使用状态 (当前为模拟数据)。")
-    # 实际中，这些信息可能需要从BrainApiSession或一个专门的服务中获取
-    # 或者通过分析应用日志来估算调用次数
-    # total_calls_today 可以考虑从一个简单计数器或应用级日志聚合中获取，但此处保持为0作为占位符。
-    return ApiUsageResponse(
-        total_calls_today=0,
-        remaining_daily_quota=None,
-        total_daily_quota=None,
-        quota_reset_time=None,
-        data_source="模拟数据/占位符 - 完整功能需增强BrainApiSession或对接平台API以获取真实用量和配额。"
-    )
+    try:
+        logger.info("请求API使用状态 (当前为模拟数据)。")
+        # 实际中，这些信息可能需要从BrainApiSession或一个专门的服务中获取
+        # 或者通过分析应用日志来估算调用次数
+        # total_calls_today 可以考虑从一个简单计数器或应用级日志聚合中获取，但此处保持为0作为占位符。
+        return ApiUsageResponse(
+            total_calls_today=0,
+            remaining_daily_quota=None,
+            total_daily_quota=None,
+            quota_reset_time=None,
+            data_source="模拟数据/占位符 - 完整功能需增强BrainApiSession或对接平台API以获取真实用量和配额。"
+        )
+    except Exception as e:
+        logger.error(f"获取API使用状态时发生意外错误: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="服务器内部发生错误，请联系管理员。"
+        )
 
 @router.get("/error_log", response_model=RecentErrorLogResponse)
 async def get_recent_error_logs(
@@ -87,6 +93,7 @@ async def get_recent_error_logs(
         # 按模拟时间（或记录时间）倒序排列，获取分页结果
         # 使用 updated_at 作为错误记录时间的代理，因为 simulated_at 可能仅在成功模拟时更新
         error_alphas_db = query.order_by(desc(AlphaModel.updated_at)).limit(page_size).offset(offset).all()
+        logger.info(f"查询到 {len(error_alphas_db)} 条符合条件的Alpha错误记录。")
 
         error_entries: List[ErrorLogEntry] = []
         for alpha_db_entry in error_alphas_db:
@@ -118,11 +125,17 @@ async def get_recent_error_logs(
             page_size=page_size,
             total_pages=total_pages
         )
-    except HTTPException: # 重新抛出由ID验证引发的HTTPException
-        raise
+    except HTTPException as http_exc: # 重新抛出由ID验证或内部逻辑引发的HTTPException
+        raise http_exc
+    except ValueError as ve: # 特定于业务逻辑的错误 (例如，如果参数验证更复杂)
+        logger.warning(f"查询错误日志处理过程中发生值错误: {ve}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
-        logger.error(f"查询错误日志时发生数据库或内部错误: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取错误日志失败。")
+        logger.error(f"查询错误日志时发生意外错误: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="服务器内部发生错误，请联系管理员。" # 标准化通用消息
+        )
 
 # 需要在 app/api/v1/__init__.py 中注册这个 router
 # (确保已导入：from typing import List, Optional; import logging, math; from datetime import datetime, timezone; import uuid)

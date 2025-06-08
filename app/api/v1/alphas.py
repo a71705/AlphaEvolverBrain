@@ -1,14 +1,15 @@
 # FastAPI 和 Pydantic 相关导入
-from fastapi import APIRouter, Depends, HTTPException, status, Query # Query 可能在此文件用不到，但先导入以保持一致性
-from typing import List, Optional # List 可能在未来扩展时用到
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import List, Optional
+import uuid # 导入 uuid 以处理 Alpha ID
 
 # SQLAlchemy 相关导入
 from sqlalchemy.orm import Session
 
 # 应用内部模块导入
-from app.database import get_db # 数据库会话依赖
-from app.schemas import AlphaDetailsResponse, AlphaResponse # Pydantic 模型 (AlphaResponse 可能用于未来扩展)
-from app.models import Alpha # SQLAlchemy ORM 模型
+from app.database import get_db
+from app.schemas import AlphaResponse # 使用 AlphaResponse 作为详细信息的响应模型
+from app.models import Alpha
 
 # 标准库导入
 import logging # 日志记录
@@ -29,24 +30,24 @@ router = APIRouter(
 # @router.get("/{alpha_id}", response_model=AlphaDetailsResponse)
 
 @router.get(
-    "/{alpha_id}",
-    response_model=AlphaDetailsResponse,
+    "/{alpha_id_str}", # 路径参数改为 alpha_id_str 以明确其为字符串
+    response_model=AlphaResponse, # 使用 AlphaResponse
     summary="获取单个Alpha的详细信息",
     description="根据Alpha的唯一ID获取其所有详细数据，包括基本信息、父代、模拟设置、各类统计数据（样本内、样本外、PnL、年度）等。"
 )
 async def get_alpha_details(
-    alpha_id: int,
+    alpha_id_str: str, # 接收字符串类型的ID
     db: Session = Depends(get_db)
 ):
     """
     获取指定ID的单个Alpha策略的全部详细信息。
 
     参数:
-        alpha_id (int): 要获取详情的Alpha的ID (路径参数)。
+        alpha_id_str (str): 要获取详情的Alpha的ID (路径参数, UUID字符串形式)。
         db (Session): SQLAlchemy 数据库会话依赖注入。
 
     返回:
-        AlphaDetailsResponse: 包含Alpha所有详细信息的响应对象。
+        AlphaResponse: 包含Alpha所有详细信息的响应对象。
 
     异常:
         HTTPException (404): 如果具有指定ID的Alpha未找到。
@@ -55,32 +56,32 @@ async def get_alpha_details(
     logger.info(f"收到获取Alpha详情的请求，Alpha ID: {alpha_id}")
 
     try:
-        # 1. 从数据库查询 Alpha 对象
-        # 可以使用 .options(selectinload(Alpha.experiment)) 等来预加载关联的实验信息，
-        # 但 AlphaDetailsResponse 目前不直接包含整个 Experiment 对象，所以简单查询即可。
-        alpha_orm = db.query(Alpha).filter(Alpha.id == alpha_id).first()
+        try:
+            # 将字符串ID转换为UUID对象进行查询
+            alpha_uuid = uuid.UUID(alpha_id_str)
+        except ValueError:
+            logger.warning(f"获取Alpha详情失败：提供的Alpha ID '{alpha_id_str}' 不是有效的UUID格式。")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Alpha ID '{alpha_id_str}' 格式无效。")
+
+        alpha_orm = db.query(Alpha).filter(Alpha.id == alpha_uuid).first()
 
         if not alpha_orm:
-            logger.warning(f"Alpha ID {alpha_id} 在数据库中未找到。")
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ID为 {alpha_id} 的Alpha未找到。")
+            logger.warning(f"获取Alpha详情失败：Alpha ID {alpha_uuid} 在数据库中未找到。")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ID为 {alpha_uuid} 的Alpha未找到。")
 
-        logger.debug(f"成功从数据库获取Alpha {alpha_id} 的记录。表达式: {alpha_orm.expression[:50]}...") # 日志中截断长表达式
+        logger.info(f"成功获取Alpha {alpha_uuid} 的详细信息。") # 改为 info, 记录成功
+        return alpha_orm
 
-        # 2. Pydantic 模型会自动从 ORM 对象转换字段
-        # AlphaDetailsResponse 的 Config 中设置了 orm_mode = True
-        # 确保 AlphaDetailsResponse 定义的字段名与 Alpha ORM 模型的属性名匹配，
-        # 或者使用 Pydantic 的 alias 功能。
-        # 当前设计是匹配的。
-
-        return alpha_orm # FastAPI 会自动使用 AlphaDetailsResponse(orm_mode=True) 来序列化 alpha_orm
-
-    except HTTPException: # 重新抛出已由我们处理的 HTTPException (如 404)
-        raise
+    except HTTPException as http_exc:
+        raise http_exc
+    except ValueError as ve: # 特定于业务逻辑的错误，例如上面UUID转换失败（虽然已处理，但作为模式）
+        logger.warning(f"获取Alpha详情处理过程中发生值错误: {ve}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
-        logger.error(f"获取Alpha {alpha_id} 详情时发生未预料的服务器内部错误: {e}", exc_info=True)
+        logger.error(f"获取Alpha {alpha_id_str} 详情时发生意外错误: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取Alpha {alpha_id} 详情时发生内部错误: {str(e)}"
+            detail="服务器内部发生错误，请联系管理员。" # 标准化通用消息
         )
 
 # ... (文件末尾，未来可能有其他与单个Alpha操作相关的端点，如删除、更新标记等)

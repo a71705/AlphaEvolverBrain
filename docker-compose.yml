@@ -1,87 +1,95 @@
 # Docker Compose 文件版本。建议使用较新的版本以支持更多功能。
 version: '3.8'
 
-# 定义服务 (services)，即应用的不同组件容器。
 services:
-  # Web 服务：运行 FastAPI 应用的容器。
+  # Web 服务: 运行 FastAPI 应用的容器
   web:
-    # 构建指令：指定 Dockerfile 的位置。
-    # '.' 表示 Dockerfile 在当前目录 (与 docker-compose.yml 同级)。
-    build: .
-    # 端口映射：将主机的 8000 端口映射到容器的 8000 端口。
-    # 格式：HOST_PORT:CONTAINER_PORT
+    build: . # Dockerfile 路径 (当前目录)
+    container_name: worldquant_alpha_web # (可选) 容器的自定义名称
     ports:
-      - "8000:8000"
-    # 环境变量：为服务设置环境变量。
-    # 这些变量可以在应用代码中通过 os.environ.get() 读取。
+      - "8000:8000" # 将主机的8000端口映射到容器的8000端口
+    env_file:
+      - ./.env # 从项目根目录的 .env 文件加载环境变量
     environment:
-      # REDIS_URL: 指定 Redis 服务的连接地址。
-      REDIS_URL: "redis://redis:6379/0"
-      DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      LOG_LEVEL: "INFO"
-      # WorldQuant Brain API 凭据 (占位符)
-      # 重要：这些是占位符值，请勿在生产中直接使用或提交到版本控制。
-      # 生产环境中应通过 Docker Secrets, HashiCorp Vault, GCP Secret Manager 等安全方式注入。
-      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 您的 WorldQuant Brain 邮箱
-      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 您的 WorldQuant Brain 密码
-    # 卷挂载：将命名卷 'alpha_db_data' 挂载到容器的 '/app/data' 目录。
-    # 这确保了 SQLite 数据库文件在容器重启或删除后依然存在。
+      # LOG_LEVEL: ${LOG_LEVEL:-INFO} # 可选: 如果 .env 中未定义 LOG_LEVEL, 则使用 INFO 作为默认值
+      # 其他特定于此服务的环境变量可以在此覆盖 .env 文件中的值，但不推荐用于敏感数据
+      PYTHONUNBUFFERED: 1 # 确保Python日志和print直接输出，便于Docker日志查看和调试
     volumes:
-      - alpha_db_data:/app/data
-      # - ./app:/app/app # 开发时代码实时更新，根据需要启用
-    # 依赖关系：定义服务启动的依赖顺序。
-    depends_on:
+      - ./app:/app # 将本地app目录挂载到容器的/app目录 (主要用于开发时的代码热重载)
+      - alpha_db_data:/app/data # SQLite数据库持久化卷 (路径应与DATABASE_URL环境变量对应)
+    depends_on: # 定义服务启动依赖顺序
       - redis
-    # 重启策略：定义容器在退出时的重启行为。
-    restart: unless-stopped
+      # 如果使用外部数据库服务 (如PostgreSQL)，应在此添加依赖:
+      # - postgres_db
+    restart: unless-stopped # 重启策略: 除非手动停止，否则容器在退出时会自动重启
+    networks: # DEV-035: 明确指定网络，确保所有服务在同一网络
+      - app_network
 
-  # Redis 服务：运行 Redis 数据库的容器。
+  # Redis 服务: 用于 RQ 任务队列和可能的缓存
   redis:
-    # 镜像：指定要使用的 Docker 镜像。
-    # 'redis:latest' 表示使用 Redis 官方的最新版本镜像。
-    image: "redis:latest"
-    # 卷挂载：将命名卷 'redis_data' 挂载到容器的 '/data' 目录。
-    # '/data' 是 Redis 默认的数据持久化目录。
-    # 这样可以确保 Redis 数据在容器重启或删除后依然存在。
+    image: "redis:latest" # 使用官方最新的 Redis 镜像
+    container_name: worldquant_alpha_redis
+    ports: # 通常Redis不直接暴露给主机，除非有特定调试需求或外部访问需求
+      - "6379:6379" # 仅用于本地开发调试。生产环境通常不应暴露 Redis 端口到公网。
     volumes:
-      - redis_data:/data # 将 redis_data 卷挂载到容器的 /data 目录
-    # 重启策略：与 web 服务类似。
+      - redis_data:/data # Redis 数据持久化卷
     restart: unless-stopped
+    networks:
+      - app_network
 
-  # Worker 服务：运行 RQ (Redis Queue) Worker 的容器，用于处理后台任务。
+  # Worker 服务: 运行 RQ (Redis Queue) Worker，处理后台任务 (如遗传算法)
   worker:
-    # 构建指令：与 web 服务使用相同的 Dockerfile。
-    # worker 也需要 Python 环境和项目依赖。
-    build: .
-    # 命令：启动 RQ Worker。
-    # "rq worker" 是 RQ 提供的命令行工具，用于启动一个 worker 进程。
-    # "-u redis://redis:6379/0" 指定 RQ 连接的 Redis 数据库 URL。
-    #   'redis' 是 Docker Compose 网络中 Redis 服务的名称。
-    #   '6379' 是 Redis 的默认端口。
-    #   '/0' 是 Redis 的默认数据库。
-    # "default" (可选参数) 指定此 worker 监听名为 'default' 的队列。
-    #   可以省略此参数，worker 默认会监听 'default' 队列。
-    #   也可以指定多个队列名称，例如：["rq", "worker", "-u", "redis://redis:6379/0", "high", "default", "low"]
-    command: ["rq", "worker", "-u", "redis://redis:6379/0", "default"]
+    build: . # 与 web 服务使用相同的 Dockerfile
+    container_name: worldquant_alpha_worker
+    # command: 指定容器启动时执行的命令。
+    # -u ${REDIS_URL:-redis://redis:6379/0}: Worker 连接到的 Redis URL。
+    #   使用环境变量插值，如果 REDIS_URL 在 .env 文件中定义，则使用该值；否则使用默认值。
+    # "default-queue" "high-priority-queue": Worker 监听的队列名称列表。
+    command: ["rq", "worker", "-u", "${REDIS_URL:-redis://redis:6379/0}", "default-queue", "high-priority-queue"]
+    env_file:
+      - ./.env # 从 .env 文件加载环境变量
     environment:
-      REDIS_URL: "redis://redis:6379/0" # RQ worker 也需要此环境变量，虽然命令行中已指定，但代码内可能用到
-      DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
-      LOG_LEVEL: "INFO"
-      # WorldQuant Brain API 凭据 (占位符) - Worker 可能也需要访问 API
-      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 占位符
-      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 占位符
-    # 卷挂载：Worker 服务也需要访问数据库文件。
-    volumes:
-      - alpha_db_data:/app/data
-      # - ./app:/app/app # 开发时代码实时更新，根据需要启用
-    depends_on:
+      # LOG_LEVEL: ${LOG_LEVEL:-INFO} # 同上, 可选的默认值覆盖
+      PYTHONUNBUFFERED: 1
+    depends_on: # Worker 依赖 Redis 和 Web 服务
       - redis
-      - web
+      - web # 确保Web服务（可能负责创建DB表结构或进行其他初始化）先启动
     restart: unless-stopped
+    volumes: # Worker 服务通常也需要访问应用代码和数据卷
+      - ./app:/app # (主要用于开发时的代码同步)
+      - alpha_db_data:/app/data # 共享数据库卷
+    networks:
+      - app_network
 
-# 定义命名卷 (named volumes)，用于数据持久化。
+  # RQ Dashboard 服务 (用于监控 RQ 任务队列)
+  rq_dashboard:
+    image: "rq/rq-dashboard:latest" # 使用官方的 rq-dashboard 镜像
+    container_name: worldquant_alpha_rq_dashboard
+    ports:
+      - "9181:9181" # 仪表盘访问端口: 主机端口:容器端口
+    environment:
+      # RQ_REDIS_URL: RQ Dashboard 连接 Redis 所需的 URL。
+      # 此处直接使用 redis 服务名，因为它在同一个 Docker 网络中。
+      # 使用环境变量插值，如果 REDIS_URL 在 .env 中定义，则优先使用该值。
+      RQ_REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+    depends_on:
+      - redis # 依赖 Redis 服务
+    restart: unless-stopped
+    networks:
+      - app_network
+
+# 定义命名卷 (named volumes)，用于数据持久化
+# 使用 local驱动，表示数据存储在运行 Docker 的主机的特定目录中 (由 Docker 管理)
 volumes:
-  # redis_data 卷：用于 Redis 服务持久化数据。
-  redis_data:
-  # alpha_db_data 卷：用于 SQLite 数据库文件持久化。
-  alpha_db_data:
+  redis_data: # Redis 数据卷声明
+    driver: local
+  alpha_db_data: # SQLite 数据库文件卷声明 (或其他数据库数据)
+    driver: local
+
+# 定义自定义网络 (networks)
+# 确保所有需要相互通信的服务都在同一个自定义网络中。
+# Docker Compose 默认会创建一个网络，但显式定义可以提供更好的控制和可读性。
+networks:
+  app_network: # 自定义网络的名称
+    driver: bridge # 使用默认的 bridge 网络驱动
+    name: wq_alpha_evolution_network # (可选) 在 Docker 主机上实际创建的网络名称。不指定则自动生成。

@@ -17,3 +17,5 @@ rq
 
 # python-dotenv: 用于从 .env 文件中读取环境变量，方便开发环境配置。
 python-dotenv
+
+yagmail

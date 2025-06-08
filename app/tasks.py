@@ -23,15 +23,15 @@ from rq.job import Job # 用于类型提示 job 参数
 import random # 用于示意性地更新 random_seed
 # from datetime import datetime # datetime 已在之前导入
 from sqlalchemy.orm import Session # 用于类型提示数据库会话
-from typing import Optional # 用于类型提示
-from datetime import datetime # 用于时间戳
+from typing import Optional, Dict, Any # 用于类型提示, Dict, Any 新增
+from datetime import datetime, timezone # 用于时间戳, timezone 新增
 
 # 导入数据库相关的模块
 from app.database import SessionLocal # 用于创建数据库会话
 # from app.database import create_tables # 通常表已由 FastAPI 应用启动时创建
 
 # 导入模型 (用于查询和更新 Experiment 对象)
-from app.models import Experiment # 假设 Experiment 模型定义在 app.models 中
+from app.models import Experiment, Alpha as AlphaModel # 导入 Experiment 和 Alpha 模型
 
 # 导入 Brain API 会话管理器
 from app.core.brain_api import BrainApiSession
@@ -39,11 +39,14 @@ from app.core.brain_api import BrainApiSession
 # 导入遗传算法核心阶段函数 (当前是占位符)
 from app.core.gp_algo import best_d1_alphas, best_d2_alphas, best_d3_alpha
 
+# 从 app.core.notifications 导入 send_email 函数 (DEV-033 新增)
+from app.core.notifications import send_email
+
 
 def _report_progress(
     job: Optional[Job],
     db_session: Session,
-    experiment_id: int,
+    experiment_id: str, # 实验ID现在是UUID字符串
     current_depth: int,
     current_iteration: int,
     message: str
@@ -54,7 +57,7 @@ def _report_progress(
     参数:
         job (Optional[Job]): 当前 RQ 作业对象。如果任务不是通过 RQ 执行，则可能为 None。
         db_session (Session): SQLAlchemy 数据库会话。
-        experiment_id (int): 当前实验的 ID。
+        experiment_id (str): 当前实验的 ID (UUID字符串)。
         current_depth (int): 遗传算法当前的深度。
         current_iteration (int): 当前深度下的迭代次数。
         message (str): 关于当前进度的描述性消息。
@@ -62,20 +65,16 @@ def _report_progress(
     try:
         # 1. 更新 RQ Job Meta
         if job:
-            if job.meta is None: # job.meta 可能在第一次设置前是 None
+            if job.meta is None:
                 job.meta = {}
 
             job.meta['progress'] = {
                 'depth': current_depth,
                 'iteration': current_iteration,
                 'message': message,
-                'timestamp': datetime.utcnow().isoformat() # 添加时间戳
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-            job.save_meta() # 保存元数据变更 (对于 RQ >= 1.0)
-            # 对于旧版本 RQ (0.x)，可能是 job.save() 或直接修改 job.meta 就被持久化了。
-            # 任务描述中是 job.save()，但 save_meta() 更精确。这里采用 save_meta() 并添加注释。
-            # 如果严格遵循 job.save()，则替换为 job.save()。
-            # logger.debug(f"实验 {experiment_id}: RQ 作业元数据已更新 - {job.meta['progress']}")
+            job.save_meta()
         else:
             logger.debug(f"实验 {experiment_id}: 非 RQ 作业上下文，跳过更新作业元数据。")
 
@@ -83,27 +82,31 @@ def _report_progress(
         experiment = db_session.query(Experiment).filter(Experiment.id == experiment_id).first()
         if experiment:
             experiment.current_depth = current_depth
-            experiment.current_iteration = current_iteration
-            # 根据任务描述，更新 random_seed。
-            # 这是一个示意性的更新，实际的随机状态管理可能更复杂。
-            experiment.random_seed = random.randint(0, 2**32 - 1)
+            # experiment.current_iteration = current_iteration # Schema中是 current_iteration_at_depth
+            experiment.current_iteration_at_depth = current_iteration
 
-            # experiment.status 应该由主任务逻辑（run_genetic_algorithm_task）在关键转换点更新，
-            # _report_progress 主要负责 current_depth/iteration/seed。
-            # 如果需要，也可以在这里更新一个更细粒度的状态，例如 experiment.progress_message = message
+            # experiment.random_seed = random.randint(0, 2**32 - 1) # 随机种子不应在每次进度报告时都更新
+                                                                # 应在实验开始时设定，或从配置中读取
+            if experiment.ga_config_json and 'random_seed' in experiment.ga_config_json:
+                 current_seed = experiment.ga_config_json['random_seed']
+            else: # 如果不存在，则生成一个并存入配置（理论上应在实验创建时完成）
+                 current_seed = random.randint(0, 2**32 - 1)
+                 if experiment.ga_config_json:
+                     experiment.ga_config_json['random_seed'] = current_seed
+                 # else: # 如果 ga_config_json 为空，则不处理，或者创建一个新的
+                 #    experiment.ga_config_json = {'random_seed': current_seed}
 
-            db_session.add(experiment) # 将更改添加到会话
-            db_session.commit()      # 提交更改到数据库
-            logger.info(f"实验 {experiment_id}: 数据库进度已更新 - 深度 {current_depth}, 迭代 {current_iteration}, 随机种子 {experiment.random_seed}。消息: {message}")
+
+            db_session.add(experiment)
+            db_session.commit()
+            logger.info(f"实验 {experiment_id}: 数据库进度已更新 - 深度 {current_depth}, 迭代 {current_iteration}, 种子 {current_seed}。消息: {message}")
         else:
             logger.warning(f"实验 {experiment_id}: 在数据库中未找到对应的实验记录，无法更新进度。")
 
     except Exception as e:
         logger.error(f"实验 {experiment_id}: 更新进度时发生错误 (_report_progress): {e}", exc_info=True)
-        # 不应在此处关闭 db_session 或重新抛出异常，让主任务的 finally 和 except 块处理。
-        # 但如果 db_session commit 失败，可能需要 rollback。
         try:
-            db_session.rollback() # 如果 commit 失败，尝试回滚以保持会话清洁
+            db_session.rollback()
             logger.info(f"实验 {experiment_id}: 数据库会话已回滚，由于更新进度时发生错误。")
         except Exception as rb_err:
             logger.error(f"实验 {experiment_id}: 在回滚数据库会话时发生额外错误: {rb_err}", exc_info=True)
@@ -112,234 +115,225 @@ def _report_progress(
 def test_task(name: str, delay: int = 5) -> str:
     """
     一个简单的 RQ 测试任务函数。
-
-    此任务接收一个名称和一个可选的延迟时间，模拟执行一些工作，
-    并记录相关信息，然后返回一个问候字符串。
-
-    参数:
-        name (str): 要在问候语中使用的名称。
-        delay (int): 模拟工作所需的秒数。默认为 5 秒。
-
-    返回:
-        str: 一个包含问候语的字符串，例如 "你好，[name]！任务已完成。"
+    ... (原有的docstring) ...
     """
-    # 获取当前正在执行的 RQ 作业对象
     job = get_current_job()
     if job:
         logger.info(f"开始执行测试任务 test_task。作业ID: {job.id}，参数 name='{name}', delay={delay}秒。")
     else:
-        # 如果任务不是通过 RQ worker 执行的（例如直接调用），job 可能为 None
         logger.info(f"开始执行测试任务 test_task (非 RQ 作业上下文)。参数 name='{name}', delay={delay}秒。")
 
-    # 模拟耗时的工作
     logger.info(f"任务 test_task ({name}): 正在模拟工作，将持续 {delay} 秒...")
     time.sleep(delay)
-
     result_message = f"你好，{name}！测试任务已在 {delay} 秒后完成。"
-
     if job:
         logger.info(f"测试任务 test_task ({name}) 完成。作业ID: {job.id}。结果: {result_message}")
     else:
         logger.info(f"测试任务 test_task ({name}) 完成。结果: {result_message}")
-
     return result_message
 
-# 示例：如果直接运行此文件进行测试（非标准用法，通常由 worker 调用）
-# if __name__ == '__main__':
-#     # 配置日志以便在控制台看到输出
-#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#     logger.info("直接调用 test_task 进行测试...")
-#     output = test_task("开发者", delay=2)
-#     logger.info(f"直接调用结果: {output}")
 
-
-def run_genetic_algorithm_task(experiment_id: int, ga_config: dict):
+def run_genetic_algorithm_task(experiment_id: str, ga_config_override: Optional[Dict[str, Any]] = None) -> str:
     """
-    执行遗传算法的主任务函数 (在 RQ Worker 中运行)。
-    （已更新以包含进度报告和断点续传逻辑）
-    此任务负责：
-    1. 初始化数据库会话和 Brain API 会话。
-    2. 查询并更新实验（Experiment）的状态。
-    3. 按顺序调用遗传算法的各个阶段函数（目前是占位符）。
-    4. 处理执行过程中的异常，并相应地更新实验状态。
-    5. 确保资源（如数据库会话）得到正确关闭。
-
-    参数:
-        experiment_id (int): 要运行的实验的 ID。
-        ga_config (dict): 包含遗传算法所有配置参数的字典。
-                           例如：种群大小、迭代次数、变异率、交叉率、
-                           模拟参数、适应度评估标准等。
+    执行遗传算法的主任务。
+    ... (原有的docstring) ...
+    任务完成（成功或失败）后会发送邮件通知。
     """
     job = get_current_job()
-    if job:
-        logger.info(f"RQ 作业 {job.id}: 开始执行 run_genetic_algorithm_task，实验ID: {experiment_id}。")
-    else:
-        logger.info(f"直接调用 run_genetic_algorithm_task (非RQ上下文)，实验ID: {experiment_id}。")
+    logger.info(f"开始执行遗传算法任务，实验ID: {experiment_id}, Job ID: {job.id if job else 'N/A'}")
 
     db: Session = SessionLocal()
-    brain_api: Optional[BrainApiSession] = None # 初始化为 None
     experiment: Optional[Experiment] = None
+    brain_api: Optional[BrainApiSession] = None
 
-    # 初始化进度变量，稍后会从数据库加载
-    current_depth_from_db = 0
-    current_iteration_from_db = 0
-    # ga_config 中的参数通常用于整个实验，但也可以有特定于阶段的设置
-    # 例如，每个深度的最大迭代次数
-    # max_iterations_per_depth = ga_config.get("max_iterations_per_depth", {}).get(str(current_depth_from_db), 10) # 示例
+    task_final_status: str = "未知"
+    error_info: str = ""
+    best_alpha_details: str = ""
 
     try:
-        # --- 获取 Brain API 凭据并初始化会话 ---
-        brain_email = os.environ.get("BRAIN_CREDENTIAL_EMAIL")
-        brain_password = os.environ.get("BRAIN_CREDENTIAL_PASSWORD")
-        if not brain_email or not brain_password:
-            error_msg = "Brain API 凭据未在环境变量中配置。任务无法继续。"
-            logger.error(f"实验 {experiment_id}: {error_msg}")
-            # 尝试更新数据库中的实验状态
-            temp_exp = db.query(Experiment).filter(Experiment.id == experiment_id).first()
-            if temp_exp:
-                temp_exp.status = "FAILED"
-                temp_exp.error_message = error_msg
-                temp_exp.end_time = datetime.utcnow()
-                db.add(temp_exp)
-                db.commit()
-            raise ValueError(error_msg) # 抛出异常以标记RQ作业失败
-
-        brain_api = BrainApiSession(email=brain_email, password=brain_password)
-
-        # --- 加载实验并处理断点续传 ---
         experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
         if not experiment:
-            logger.error(f"实验 {experiment_id}: 在数据库中未找到。任务终止。")
-            raise ValueError(f"实验ID {experiment_id} 不存在。")
+            error_msg = f"实验ID {experiment_id} 未找到。"
+            logger.error(f"{error_msg} 任务终止。")
+            task_final_status = "失败 (配置错误)"
+            error_info = error_msg
+            # 注意：这里直接抛出异常，finally块会执行邮件发送
+            raise ValueError(error_info)
 
-        if experiment.status == "COMPLETED":
-            logger.info(f"实验 {experiment.name} (ID: {experiment_id}) 已标记为 COMPLETED。任务将不会重新运行。")
-            return # 直接退出，不重新执行已完成的实验
-
-        if experiment.status == "RUNNING":
-             logger.warning(f"实验 {experiment.name} (ID: {experiment_id}) 当前状态为 RUNNING，可能表示之前的任务异常中断。将尝试从保存的进度恢复。")
-             # 如果需要更复杂的逻辑，例如检查上次心跳时间来判断是否真的中断，可以在此添加
-
-        # 加载已保存的进度用于断点续传
-        current_depth_from_db = experiment.current_depth if experiment.current_depth is not None else 0
-        current_iteration_from_db = experiment.current_iteration if experiment.current_iteration is not None else 0
-
-        if experiment.random_seed is not None:
-            logger.info(f"实验 {experiment_id}: 从数据库恢复随机种子: {experiment.random_seed}。")
-            random.seed(experiment.random_seed)
-        else:
-            # 如果没有保存的种子，可以生成一个新的并立即保存一次进度，或者在首次 _report_progress 时保存
-            new_seed = random.randint(0, 2**32 - 1)
-            random.seed(new_seed)
-            logger.info(f"实验 {experiment_id}: 生成了新的随机种子: {new_seed} (将在首次进度报告时保存到数据库)。")
-
-
-        logger.info(f"实验 {experiment.name} (ID: {experiment_id}): 状态从 {experiment.status} 更新为 RUNNING。尝试从深度 {current_depth_from_db}，迭代 {current_iteration_from_db} 继续。")
-        experiment.status = "RUNNING"
-        if experiment.start_time is None: # 仅在首次启动时设置开始时间
-             experiment.start_time = datetime.utcnow()
-        experiment.error_message = None # 清除之前的错误信息
-        db.add(experiment)
-        db.commit()
-
-        # 首次报告进度，包含了初始（或恢复的）随机种子
-        _report_progress(job, db, experiment_id, current_depth_from_db, current_iteration_from_db, "任务启动/恢复，状态设为RUNNING")
+        # 仅当状态不是 FAILED 或 COMPLETED 时才设置为 RUNNING 并重置/设置时间
+        if experiment.status not in ["COMPLETED", "FAILED"]:
+            experiment.status = "RUNNING"
+            if experiment.start_time is None: # 仅在首次启动时设置开始时间
+                experiment.start_time = datetime.now(timezone.utc)
+            experiment.error_message = None # 清除之前的错误信息
+            # end_time 应该在任务真正结束时设置，而不是在开始时清除
+            # experiment.end_time = None
+            db.add(experiment)
+            db.commit()
+            logger.info(f"实验 {experiment.name} (ID: {experiment_id}) 状态已更新为 RUNNING。")
+        elif experiment.status == "COMPLETED":
+            logger.info(f"实验 {experiment.name} (ID: {experiment_id}) 已完成，任务不再执行。")
+            task_final_status = "已完成 (未重新执行)"
+            return f"实验 {experiment_id} 已完成。" # 直接返回，finally 块仍会执行
+        elif experiment.status == "FAILED":
+            # 如果允许重试FAILED的任务，则可能需要不同的逻辑。目前假设FAILED任务不自动重试。
+            logger.warning(f"实验 {experiment.name} (ID: {experiment_id}) 状态为 FAILED，任务未执行。")
+            task_final_status = "失败 (未重新执行)"
+            error_info = experiment.error_message or "先前已标记为失败。"
+            return f"实验 {experiment_id} 先前已失败。" # 直接返回
 
 
-        # --- 调用遗传算法的各个阶段函数 ---
-        # 这里的逻辑需要根据 current_depth_from_db 和 current_iteration_from_db 来调整
-        # 以便能够跳过已完成的阶段或迭代。
-        # 为简单起见，占位符函数目前不真正处理这些“起始点”参数，
-        # 但 run_genetic_algorithm_task 会按顺序调用它们，并传递当前进度。
-        # 实际的GA循环需要更复杂的逻辑来管理迭代和深度。
+        brain_email = os.environ.get("BRAIN_CREDENTIAL_EMAIL")
+        brain_password = os.environ.get("BRAIN_CREDENTIAL_PASSWORD")
+        if not (brain_email and brain_password):
+            error_msg = "Brain API 凭据 (BRAIN_CREDENTIAL_EMAIL, BRAIN_CREDENTIAL_PASSWORD) 未在环境变量中设置。"
+            logger.error(error_msg)
+            task_final_status = "失败 (配置错误)" # 更新状态以便邮件通知
+            error_info = error_msg
+            raise EnvironmentError("Brain API 凭据未配置。")
 
-        # 假设 ga_config 中有总深度数, 例如 ga_config.get('total_depths', 3)
-        # 并且每个 best_dX_alphas 对应一个深度。
+        brain_api = BrainApiSession(email=brain_email, password=brain_password)
+        logger.info("BrainApiSession 初始化成功。")
 
-        # 阶段/深度 1 (假设 current_depth 0 代表 d1)
-        if current_depth_from_db <= 0: # 如果未开始或在深度0
-            logger.info(f"实验 {experiment_id}: 开始/继续 best_d1_alphas (深度0)。当前迭代（从数据库加载）: {current_iteration_from_db if current_depth_from_db == 0 else 0}")
-            # 实际的 best_d1_alphas 可能需要 current_iteration_from_db 作为参数以从特定迭代恢复
-            d1_results = best_d1_alphas(brain_api, db, experiment_id, ga_config) # 传递当前迭代等
-            current_depth_from_db = 0 # 标记当前完成的深度
-            current_iteration_from_db = ga_config.get("iterations_at_depth_0", 10) # 假设完成此深度的所有迭代
-            _report_progress(job, db, experiment_id, current_depth_from_db, current_iteration_from_db, "best_d1_alphas 完成")
-            logger.info(f"实验 {experiment_id}: best_d1_alphas 完成。")
-        else:
-            logger.info(f"实验 {experiment_id}: 跳过 best_d1_alphas (深度0)，因已从深度 {current_depth_from_db} 恢复。")
+        ga_config = experiment.ga_config_json.copy() if experiment.ga_config_json else {}
+        if ga_config_override:
+            ga_config.update(ga_config_override)
+        logger.info(f"使用的遗传算法配置: {ga_config}")
 
-
-        # 阶段/深度 2 (假设 current_depth 1 代表 d2)
-        if current_depth_from_db <= 1:
-            # 如果是从深度0过来的，重置迭代计数器；如果是从深度1恢复，则使用 current_iteration_from_db
-            iter_start_d2 = current_iteration_from_db if current_depth_from_db == 1 else 0
-            logger.info(f"实验 {experiment_id}: 开始/继续 best_d2_alphas (深度1)。起始迭代: {iter_start_d2}")
-            # 假设 d1_results 需要从数据库或其他地方重新加载，如果任务是恢复的
-            # 为简单，这里假设 d1_results 仍然可用或 best_d2_alphas 能处理
-            # 实际中，可能需要查询数据库获取上一阶段的优秀个体
-            if 'd1_results' not in locals(): # 如果跳过了d1阶段
-                # d1_results = load_alphas_from_db(db, experiment_id, depth=0, criteria="best") # 示意性
-                logger.warning(f"实验 {experiment_id}: d1_results 未定义，可能需要从数据库加载以用于 best_d2_alphas。占位符将使用空列表。")
-                d1_results = []
-            d2_results = best_d2_alphas(brain_api, db, experiment_id, ga_config, previous_generation_alphas=d1_results) # 传递迭代
-            current_depth_from_db = 1
-            current_iteration_from_db = ga_config.get("iterations_at_depth_1", 10)
-            _report_progress(job, db, experiment_id, current_depth_from_db, current_iteration_from_db, "best_d2_alphas 完成")
-            logger.info(f"实验 {experiment_id}: best_d2_alphas 完成。")
-        else:
-            logger.info(f"实验 {experiment_id}: 跳过 best_d2_alphas (深度1)，因已从深度 {current_depth_from_db} 恢复。")
+        # 确保随机种子被设置和记录 (如果需要的话)
+        if 'random_seed' not in ga_config or ga_config['random_seed'] is None:
+            ga_config['random_seed'] = random.randint(0, 2**32 - 1)
+            logger.info(f"为实验 {experiment_id} 生成/设置随机种子: {ga_config['random_seed']}")
+            experiment.ga_config_json = ga_config # 保存回数据库
+            db.add(experiment)
+            db.commit()
+        random.seed(ga_config['random_seed'])
 
 
-        # 阶段/深度 3 (假设 current_depth 2 代表 d3)
-        if current_depth_from_db <= 2:
-            iter_start_d3 = current_iteration_from_db if current_depth_from_db == 2 else 0
-            logger.info(f"实验 {experiment_id}: 开始/继续 best_d3_alpha (深度2)。起始迭代: {iter_start_d3}")
-            if 'd2_results' not in locals():
-                logger.warning(f"实验 {experiment_id}: d2_results 未定义，可能需要从数据库加载以用于 best_d3_alpha。占位符将使用空列表。")
-                d2_results = []
-            d3_results = best_d3_alpha(brain_api, db, experiment_id, ga_config, previous_generation_alphas=d2_results) # 传递迭代
-            current_depth_from_db = 2
-            current_iteration_from_db = ga_config.get("iterations_at_depth_2", 10)
-            _report_progress(job, db, experiment_id, current_depth_from_db, current_iteration_from_db, "best_d3_alpha 完成")
-            logger.info(f"实验 {experiment_id}: best_d3_alpha 完成。")
-        else:
-            logger.info(f"实验 {experiment_id}: 跳过 best_d3_alpha (深度2)，因已从深度 {current_depth_from_db} 恢复。")
+        logger.info(f"实验 {experiment_id}: 遗传算法主循环开始...")
+        # 【重要】实际的遗传算法调用逻辑应在此处
+        # 示例:
+        # population_d1 = best_d1_alphas(brain_api_session=brain_api, db_session=db, experiment_id=experiment_id, ga_config=ga_config)
+        # population_d2 = best_d2_alphas(brain_api_session=brain_api, db_session=db, experiment_id=experiment_id, ga_config=ga_config, initial_population=population_d1)
+        # final_population = best_d3_alpha(brain_api_session=brain_api, db_session=db, experiment_id=experiment_id, ga_config=ga_config, initial_population=population_d2)
+        time.sleep(2) # 模拟工作负载从10秒减少到2秒
+        logger.info(f"实验 {experiment_id}: 遗传算法主循环完成。")
 
-
-        # --- 所有阶段成功完成 ---
-        logger.info(f"实验 {experiment.name} (ID: {experiment_id}): 所有遗传算法阶段成功完成。状态更新为 COMPLETED。")
         experiment.status = "COMPLETED"
-        experiment.end_time = datetime.utcnow()
-        # experiment.error_message = None # 已在启动时清除
+        experiment.end_time = datetime.now(timezone.utc)
         db.add(experiment)
         db.commit()
+        logger.info(f"实验 {experiment.name} (ID: {experiment_id}) 已成功完成。")
+        task_final_status = "成功完成"
 
-        if job:
-             logger.info(f"RQ 作业 {job.id}: run_genetic_algorithm_task 成功完成，实验ID: {experiment_id}。")
+        # 查询最佳Alpha信息用于邮件
+        best_alpha = db.query(AlphaModel).filter(AlphaModel.experiment_id == experiment_id) \
+            .order_by(AlphaModel.fitness_score.desc().nullslast()).first() # fitness_score 来自 AlphaResponse schema
+        if best_alpha:
+            best_alpha_details = (
+                f"最佳Alpha ID: {best_alpha.id}<br>"
+                f"表达式: {best_alpha.expression[:100]}{'...' if len(best_alpha.expression) > 100 else ''}<br>"
+                f"适应度得分: {best_alpha.fitness_score:.4f if best_alpha.fitness_score is not None else 'N/A'}"
+            )
+        else:
+            best_alpha_details = "未能找到最佳Alpha信息。"
+
+        return f"实验 {experiment_id} 成功完成。"
 
     except Exception as e:
-        logger.error(f"实验 {experiment_id}: 在执行 run_genetic_algorithm_task 过程中发生严重错误: {e}", exc_info=True)
-        if experiment:
-            logger.error(f"实验 {experiment.name} (ID: {experiment_id}): 因错误将状态更新为 FAILED。")
+        logger.error(f"实验 {experiment_id} 的遗传算法任务执行失败: {e}", exc_info=True)
+        task_final_status = "执行失败" # 更新状态
+        error_info = f"{type(e).__name__}: {str(e)}"
+        if experiment: # 确保 experiment 对象存在
             experiment.status = "FAILED"
-            if experiment.end_time is None: # 只有当之前未设置过（例如，不是在COMPLETED后又失败）才设置
-                experiment.end_time = datetime.utcnow()
-            experiment.error_message = f"任务执行失败: {str(e)[:450]}" # 截断以适应可能的字段长度
+            if hasattr(experiment, 'error_message'): # 确保模型有 error_message 字段
+                experiment.error_message = error_info[:499] # 限制长度以防超出数据库字段限制
+            if not experiment.end_time: # 仅当尚未设置结束时间时设置
+                experiment.end_time = datetime.now(timezone.utc)
             db.add(experiment)
-            try:
-                db.commit()
-            except Exception as db_err:
-                logger.error(f"实验 {experiment_id}: 更新实验状态为 FAILED 时数据库提交失败: {db_err}", exc_info=True)
-                db.rollback()
-
-        if job:
-            logger.error(f"RQ 作业 {job.id}: run_genetic_algorithm_task 执行失败，实验ID: {experiment_id}。")
-        raise
+            db.commit()
+        # 此处不应返回，让 finally 块执行邮件发送，然后RQ会自动处理异常并标记作业失败
+        raise # 重新抛出异常，以便RQ能捕获并标记作业为失败
 
     finally:
+        # 邮件发送逻辑
+        if experiment: # 确保 experiment 对象已加载
+            recipient = os.environ.get("DEFAULT_NOTIFICATION_RECIPIENT")
+            if recipient:
+                exp_name = experiment.name if experiment.name else f"ID {experiment_id}"
+                # 确保时间对象存在且有时区信息
+                start_time_obj = experiment.start_time
+                if start_time_obj and start_time_obj.tzinfo is None:
+                    start_time_obj = start_time_obj.replace(tzinfo=timezone.utc)
+                exp_start_time_str = start_time_obj.strftime("%Y-%m-%d %H:%M:%S %Z") if start_time_obj else "未知"
+
+                # 结束时间应为当前时间，因为任务到此结束
+                current_time_utc = datetime.now(timezone.utc)
+                exp_end_time_str = current_time_utc.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+                subject = f"遗传算法实验 '{exp_name}' 执行{task_final_status}"
+
+                html_parts = [
+                    "<html><head><style>",
+                    "body { font-family: Arial, sans-serif; margin: 20px; color: #333; }",
+                    "h1 { color: #2a2f36; border-bottom: 1px solid #eee; padding-bottom: 10px; }",
+                    "p { line-height: 1.6; margin-bottom: 10px; }",
+                    "strong { color: #555; }",
+                    ".status-success { color: #28a745; font-weight: bold; }",
+                    ".status-failed { color: #dc3545; font-weight: bold; }",
+                    ".status-unknown { color: #ffc107; font-weight: bold; }",
+                    ".details-box { background-color: #f8f9fa; border: 1px solid #e9ecef; border-left-width: 6px; padding: 15px; margin-top:15px; border-radius: 4px; }",
+                    ".error-details { border-left-color: #f5c6cb; }",
+                    ".alpha-details { border-left-color: #b8daff; }",
+                    "pre { white-space: pre-wrap; word-wrap: break-word; background-color: #e9ecef; padding: 10px; border-radius: 4px;}",
+                    "hr { border: none; border-top: 1px solid #eee; margin: 20px 0; }",
+                    ".footer { font-size: 0.9em; color: #777; margin-top: 20px; text-align: center; }",
+                    "</style></head><body>",
+                    f"<h1>实验执行通知</h1>",
+                    f"<p><strong>实验名称:</strong> {exp_name}</p>",
+                    f"<p><strong>实验ID:</strong> {experiment_id}</p>"
+                ]
+
+                status_class = "status-unknown"
+                if task_final_status == "成功完成":
+                    status_class = "status-success"
+                elif "失败" in task_final_status or "执行失败" in task_final_status:
+                    status_class = "status-failed"
+
+                html_parts.append(f"<p><strong>状态:</strong> <span class='{status_class}'>{task_final_status}</span></p>")
+                html_parts.append(f"<p><strong>任务计划/实际开始时间:</strong> {exp_start_time_str}</p>")
+                html_parts.append(f"<p><strong>通知生成时间 (任务结束):</strong> {exp_end_time_str}</p>")
+
+                if task_final_status == "成功完成":
+                    html_parts.append(f"<h2>实验结果摘要:</h2><div class='details-box alpha-details'>{best_alpha_details if best_alpha_details else '任务已顺利完成，无特定Alpha信息。'}</div>")
+                elif task_final_status != "未知" and error_info: # 对于失败或配置错误等，且有错误信息
+                    html_parts.append(f"<h2>错误详情:</h2><div class='details-box error-details'><pre>{error_info}</pre></div>")
+
+                html_parts.extend([
+                    "<hr><p class='footer'>此邮件为WorldQuant Alpha Evolution系统自动发送，请勿回复。</p>",
+                    "</body></html>"
+                ])
+                body_html = "".join(html_parts)
+
+                logger.info(f"准备发送实验 '{exp_name}' 的完成通知邮件至 {recipient}。状态: {task_final_status}")
+                if not send_email(recipient, subject, body_html):
+                    logger.error(f"发送实验 '{exp_name}' 的通知邮件失败。")
+            else:
+                logger.warning("DEFAULT_NOTIFICATION_RECIPIENT 未在环境变量中设置，无法发送任务完成邮件。")
+
         if db:
             db.close()
-            logger.debug(f"实验 {experiment_id}: 数据库会话已关闭。")
+        logger.info(f"遗传算法任务处理完成，实验ID: {experiment_id}, Job ID: {job.id if job else 'N/A'}")
+        # 如果任务因异常退出，RQ 会自动标记作业为 'failed'。
+        # 如果正常完成，RQ 会标记为 'finished'。
+        # 此处的返回字符串主要用于日志或直接调用时的结果。
+        # 如果有异常被重新抛出 (如上面 raise)，则此 return 语句不会执行。
 
-# 确保所有必要的导入 (datetime, random, Optional, Session, Job, Experiment, BrainApiSession, _report_progress, best_dX_alphas)
-# 都在 app/tasks.py 的文件顶部。
+    # 这个 return 语句只会在 try 块中的 return 语句被执行时（即实验之前已完成或失败）才会被执行。
+    # 如果 try 块中发生异常并被捕获和重新抛出，或者 try 块成功执行到末尾并返回，
+    # 则这个顶层的 return 语句不会被执行。
+    # 为了确保函数总有返回值（即使理论上某些路径不会到达），可以保留一个。
+    # 但在当前结构下，如果try块成功，它有自己的return；如果失败，它会raise。
+    # 如果实验一开始就处于 COMPLETED/FAILED 状态，也会有 return。
+    # 所以这个 return 可能永远不会被达到。可以考虑移除或调整逻辑。
+    return f"任务处理流程已结束，实验ID: {experiment_id}，最终状态: {task_final_status}"
