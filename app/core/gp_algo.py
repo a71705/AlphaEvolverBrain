@@ -263,13 +263,7 @@ def depth_three_tree(
 def _recursive_tree_to_alpha(node: Optional[Node]) -> str:
     """
     递归辅助函数，用于将表达式树节点转换为 Alpha 表达式字符串。
-
-    Args:
-        node (Optional[Node]): 当前要转换的节点。
-
-    Returns:
-        str: 该节点及其子树对应的 Alpha 表达式字符串片段。
-             如果节点为空或无效，则返回空字符串。
+    (详细注释见之前实现)
     """
     if node is None:
         logger.warning("_recursive_tree_to_alpha: 遇到 None 节点。")
@@ -308,13 +302,7 @@ def _recursive_tree_to_alpha(node: Optional[Node]) -> str:
 def tree_to_alpha(tree_root: Node) -> str:
     """
     将整个表达式树转换为 Alpha 表达式字符串。
-    这是一个通用的递归转换函数。
-
-    Args:
-        tree_root (Node): 表达式树的根节点。
-
-    Returns:
-        str: 从树转换得到的完整 Alpha 表达式字符串。
+    (详细注释见之前实现)
     """
     if not isinstance(tree_root, Node):
         logger.error(f"tree_to_alpha接收到的输入不是Node类型: {type(tree_root)}")
@@ -332,7 +320,7 @@ def fitness_fun(
 ) -> float:
     """
     计算给定 Alpha 表达式的适应度分数。
-    【占位符实现】此函数的具体逻辑需要根据项目需求和 WorldQuant Brain 的评估方式来定义。
+    【占位符实现】
     (详细注释见之前实现)
     """
     logger.warning(
@@ -350,4 +338,164 @@ def fitness_fun(
     logger.info(f"为表达式 '{alpha_expression}' 计算的伪适应度分数为: {pseudo_fitness}")
     return pseudo_fitness
 
-# 后续将在此处定义其他遗传编程相关函数 (如交叉、变异等)
+def copy_tree(original_node: Optional[Node]) -> Optional[Node]:
+    """
+    递归地深度复制一个表达式树。
+
+    Args:
+        original_node (Optional[Node]): 要复制的树的根节点。
+
+    Returns:
+        Optional[Node]: 新创建的树的根节点副本，如果原始节点为None则返回None。
+    """
+    if original_node is None:
+        return None
+
+    left_copy = copy_tree(original_node.left)
+    right_copy = copy_tree(original_node.right)
+
+    return Node(original_node.value, left_copy, right_copy)
+
+def _collect_nodes_recursive(current_node: Optional[Node], nodes_list: List[Node]):
+    """
+    递归辅助函数，用于收集树中所有节点。
+
+    Args:
+        current_node (Optional[Node]): 当前正在访问的节点。
+        nodes_list (List[Node]): 用于累积收集到的节点的列表。
+    """
+    if current_node is not None:
+        nodes_list.append(current_node)
+        _collect_nodes_recursive(current_node.left, nodes_list)
+        _collect_nodes_recursive(current_node.right, nodes_list)
+
+def get_all_nodes(root_node: Node) -> List[Node]:
+    """
+    获取给定树中的所有节点列表。
+
+    Args:
+        root_node (Node): 树的根节点。
+
+    Returns:
+        List[Node]: 包含树中所有节点的列表。
+    """
+    collected_nodes: List[Node] = []
+    if root_node is not None: # 确保根节点不是None才开始收集
+        _collect_nodes_recursive(root_node, collected_nodes)
+    return collected_nodes
+
+def get_random_node(root_node: Node) -> Optional[Node]:
+    """
+    从树中随机选择一个节点。
+
+    Args:
+        root_node (Node): 树的根节点。
+
+    Returns:
+        Optional[Node]: 随机选择的节点，如果树为空或无效则返回 None。
+    """
+    if root_node is None: # 处理空树的情况
+        logger.warning("get_random_node: 尝试从空树中选择节点。")
+        return None
+    all_nodes = get_all_nodes(root_node)
+    if not all_nodes:
+        logger.warning("get_random_node: 未能从树中收集到任何节点。")
+        return None
+    return random.choice(all_nodes)
+
+def mutate_random_node(
+    original_tree_root: Node,
+    max_mutation_depth: int = 1,
+    available_terminals: Optional[List[str]] = None,
+    available_unary_ops: Optional[List[str]] = None,
+    available_binary_ops: Optional[List[str]] = None,
+    available_ts_ops: Optional[List[str]] = None,
+    available_ts_ops_params: Optional[List[str]] = None
+) -> Optional[Node]: # 返回 Optional[Node] 以处理原始树为空的情况
+    """
+    对树进行变异操作：随机选择一个节点，并用一个新的随机生成的子树替换它。
+    (详细注释见之前实现)
+    """
+    if original_tree_root is None:
+        logger.warning("mutate_random_node: 尝试对空树进行变异，返回None。")
+        return None
+
+    mutated_tree_root = copy_tree(original_tree_root)
+    if mutated_tree_root is None:
+         logger.error("mutate_random_node: 复制树失败。")
+         return original_tree_root
+
+    node_to_mutate = get_random_node(mutated_tree_root)
+
+    if node_to_mutate is None:
+        logger.warning("mutate_random_node: 未能从树中选择节点进行变异，返回原始树副本。")
+        return mutated_tree_root
+
+    logger.debug(f"变异操作：选中节点 {node_to_mutate!r} (值为 '{node_to_mutate.value}') 进行变异。")
+
+    if max_mutation_depth == 0:
+        new_subtree_flag = 0
+    else:
+        new_subtree_flag = random.choice([0, 1, 2, 3])
+
+    replacement_subtree_root = depth_one_tree(
+        flag=new_subtree_flag,
+        available_terminals=available_terminals,
+        available_unary_ops=available_unary_ops,
+        available_binary_ops=available_binary_ops,
+        available_ts_ops=available_ts_ops,
+        available_ts_ops_params=available_ts_ops_params
+    )
+
+    logger.debug(f"变异操作：生成替换子树 {replacement_subtree_root!r}")
+
+    node_to_mutate.value = replacement_subtree_root.value
+    node_to_mutate.left = replacement_subtree_root.left
+    node_to_mutate.right = replacement_subtree_root.right
+
+    logger.info(f"节点 (在副本中) 已变异。新值为 '{node_to_mutate.value}'。")
+    return mutated_tree_root
+
+def crossover(parent1_root: Node, parent2_root: Node) -> Tuple[Optional[Node], Optional[Node]]: # 返回 Optional Nodes
+    """
+    对两个父树进行交叉操作，生成两个子树。
+    (详细注释见之前实现)
+    """
+    if parent1_root is None or parent2_root is None:
+        logger.error("交叉操作：一个或两个父树为空。返回原始树（的副本，如果非空）。")
+        return (copy_tree(parent1_root), copy_tree(parent2_root))
+
+    child1_root = copy_tree(parent1_root)
+    child2_root = copy_tree(parent2_root)
+
+    if child1_root is None or child2_root is None:
+        logger.error("交叉操作中复制父树失败。")
+        # 返回原始树的副本，以防万一其中一个复制成功
+        return (copy_tree(parent1_root) if child1_root is None else child1_root,
+                copy_tree(parent2_root) if child2_root is None else child2_root)
+
+
+    crossover_point1 = get_random_node(child1_root)
+    crossover_point2 = get_random_node(child2_root)
+
+    if crossover_point1 is None or crossover_point2 is None:
+        logger.warning("交叉操作：未能从一个或两个子树中选择交叉点。返回原始树的副本。")
+        return (child1_root, child2_root)
+
+    logger.debug(f"交叉操作：选中 child1 的节点 {crossover_point1!r} (value: '{crossover_point1.value}')")
+    logger.debug(f"交叉操作：选中 child2 的节点 {crossover_point2!r} (value: '{crossover_point2.value}')")
+
+    p1_value, p1_left, p1_right = crossover_point1.value, crossover_point1.left, crossover_point1.right
+
+    crossover_point1.value = crossover_point2.value
+    crossover_point1.left = crossover_point2.left
+    crossover_point1.right = crossover_point2.right
+
+    crossover_point2.value = p1_value
+    crossover_point2.left = p1_left
+    crossover_point2.right = p1_right
+
+    logger.info("交叉操作完成。")
+    return (child1_root, child2_root)
+
+# 后续将在此处定义遗传算法主循环等
