@@ -53,17 +53,23 @@ services:
     # 构建指令：与 web 服务使用相同的 Dockerfile。
     # worker 也需要 Python 环境和项目依赖。
     build: .
-    # 命令：覆盖 Dockerfile 中的 CMD 指令。
-    # ["tail", "-f", "/dev/null"] 是一个占位命令，使容器保持运行状态。
-    # 在 DEV-013 任务中，这个命令会被替换为实际启动 RQ worker 的命令。
-    command: ["tail", "-f", "/dev/null"]
+    # 命令：启动 RQ Worker。
+    # "rq worker" 是 RQ 提供的命令行工具，用于启动一个 worker 进程。
+    # "-u redis://redis:6379/0" 指定 RQ 连接的 Redis 数据库 URL。
+    #   'redis' 是 Docker Compose 网络中 Redis 服务的名称。
+    #   '6379' 是 Redis 的默认端口。
+    #   '/0' 是 Redis 的默认数据库。
+    # "default" (可选参数) 指定此 worker 监听名为 'default' 的队列。
+    #   可以省略此参数，worker 默认会监听 'default' 队列。
+    #   也可以指定多个队列名称，例如：["rq", "worker", "-u", "redis://redis:6379/0", "high", "default", "low"]
+    command: ["rq", "worker", "-u", "redis://redis:6379/0", "default"]
     environment:
-      REDIS_URL: "redis://redis:6379/0"
+      REDIS_URL: "redis://redis:6379/0" # RQ worker 也需要此环境变量，虽然命令行中已指定，但代码内可能用到
       DATABASE_URL: "sqlite:///./data/alpha_evolution.db"
       LOG_LEVEL: "INFO"
       # WorldQuant Brain API 凭据 (占位符) - Worker 可能也需要访问 API
-      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com"
-      BRAIN_CREDENTIAL_PASSWORD: "your_password"
+      BRAIN_CREDENTIAL_EMAIL: "your_email@example.com" # 占位符
+      BRAIN_CREDENTIAL_PASSWORD: "your_password"       # 占位符
     # 卷挂载：Worker 服务也需要访问数据库文件。
     volumes:
       - alpha_db_data:/app/data
