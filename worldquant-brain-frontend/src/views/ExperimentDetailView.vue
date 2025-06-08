@@ -54,27 +54,23 @@
       </div>
     </el-card>
 
-    <!-- 为 DEV-030 (Alpha性能表格) 预留区域 -->
     <el-card class="box-card alpha-table-card" style="margin-top: 20px;">
       <template #header>
         <div class="card-header">
           <span>Alpha 表现</span>
         </div>
       </template>
-      <!-- AlphaTable 组件将在此处渲染 (DEV-030) -->
       <AlphaTable v-if="experiment && experiment.id" :experiment-id="experiment.id" />
     </el-card>
 
-    <!-- 为 DEV-031 (适应度曲线图表) 预留区域 -->
     <el-card class="box-card fitness-chart-card" style="margin-top: 20px;">
       <template #header>
         <div class="card-header">
           <span>适应度演化曲线</span>
         </div>
       </template>
-      <div id="fitness-evolution-chart-placeholder">
-        <p style="text-align: center; color: #909399;">适应度演化图表加载区域 (DEV-031)</p>
-      </div>
+      <FitnessChart v-if="experiment" :fitness-data="formattedFitnessHistory" :loading="chartLoadingInitial" />
+      <div v-else-if="loading && !experiment" class="chart-initial-loading" style="text-align: center; padding: 20px; color: #909399;">图表数据随实验详情加载中...</div>
     </el-card>
 
   </div>
@@ -87,27 +83,34 @@ import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import axios from 'axios';
 import { ElMessage, ElStatistic, ElProgress, ElDescriptions, ElDescriptionsItem, ElTag, ElCard, ElRow, ElCol, ElEmpty } from 'element-plus';
-        import AlphaTable from '@/components/AlphaTable.vue'; // 导入 AlphaTable
+import AlphaTable from '@/components/AlphaTable.vue';
+import FitnessChart from '@/components/FitnessChart.vue'; // 导入 FitnessChart
 
 export default {
   name: 'ExperimentDetailView',
-          components: { AlphaTable, ElStatistic, ElProgress, ElDescriptions, ElDescriptionsItem, ElTag, ElCard, ElRow, ElCol, ElEmpty },
+  components: { AlphaTable, FitnessChart, ElStatistic, ElProgress, ElDescriptions, ElDescriptionsItem, ElTag, ElCard, ElRow, ElCol, ElEmpty },
   setup() {
     const route = useRoute();
-            const experimentId = ref(route.params.experimentId);
+    const experimentId = ref(route.params.experimentId);
     const experiment = ref(null);
-    const loading = ref(false);
+    const loading = ref(false); // Main experiment data loading
     const error = ref('');
+    const chartLoadingInitial = ref(true); // Separate loading state for chart, initially true until first data load
+
     let pollingInterval = null;
 
     const fetchExperimentDetail = async () => {
       if (!experimentId.value) {
         error.value = "实验ID未提供";
         loading.value = false;
+        chartLoadingInitial.value = false;
         return;
       }
-      // 首次加载或非轮询时显示全局加载状态
-      if (!experiment.value && !pollingInterval) loading.value = true; // Only show global loading on initial load
+
+      if (!experiment.value && !pollingInterval) {
+          loading.value = true;
+          chartLoadingInitial.value = true; // Also true during initial full load
+      }
       error.value = '';
 
       try {
@@ -115,37 +118,67 @@ export default {
                        ? `${process.env.VUE_APP_API_BASE_URL}/api/v1/experiments/${experimentId.value}`
                        : `/api/v1/experiments/${experimentId.value}`;
         const response = await axios.get(apiUrl, {
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('session_token')}` } // 添加认证头
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('session_token')}` }
         });
         experiment.value = response.data;
+        chartLoadingInitial.value = false; // Data loaded, chart can now process
       } catch (err) {
         console.error(`获取实验 ${experimentId.value} 详情失败:`, err);
+        let errorMsg = '';
         if (err.response && err.response.status === 401) {
-            error.value = '认证失败，请重新登录。';
-            // router.push('/login'); // 可选：如果认证失败则跳转到登录页
+            errorMsg = '认证失败，请重新登录。';
         } else if (err.response && err.response.data && err.response.data.detail) {
-          error.value = err.response.data.detail;
+          errorMsg = err.response.data.detail;
         } else if (err.request) {
-          error.value = '无法连接到服务器。';
+          errorMsg = '无法连接到服务器。';
         } else {
-          error.value = err.message;
+          errorMsg = err.message;
         }
-        if (!pollingInterval && !experiment.value) { // 只有在首次加载失败时才显示全局错误提示
-            ElMessage.error(`加载实验数据失败: ${error.value}`);
+
+        if (!pollingInterval && !experiment.value) {
+            error.value = errorMsg;
+            ElMessage.error(`加载实验数据失败: ${errorMsg}`);
         } else {
-            console.warn(`轮询实验 ${experimentId.value} 数据失败: ${error.value}`);
+            console.warn(`轮询实验 ${experimentId.value} 数据失败: ${errorMsg}`);
         }
+        chartLoadingInitial.value = false; // Error occurred, stop chart loading
       } finally {
         if (loading.value && !pollingInterval) loading.value = false;
       }
     };
+
+    const formattedFitnessHistory = computed(() => {
+      // Attempt to get fitness_history from ga_config_json first
+      if (experiment.value?.ga_config_json?.fitness_history && Array.isArray(experiment.value.ga_config_json.fitness_history)) {
+        return experiment.value.ga_config_json.fitness_history.map(item => ({
+          iteration: item.iteration ?? item.generation, // Prefer iteration, fallback to generation
+          fitness: item.best_fitness ?? item.fitness,    // Prefer best_fitness, fallback to fitness
+          avg_fitness: item.avg_fitness
+        })).sort((a, b) => (a.iteration || 0) - (b.iteration || 0)); // Ensure sorted by iteration
+      }
+      // Fallback: if experiment.value.alphas (full alpha list) is available and fitness_history is not.
+      // This is less ideal as it might be a very large list and not directly represent generation-wise progress.
+      // This part is more of a placeholder if direct fitness_history is missing.
+      if (experiment.value?.alphas && Array.isArray(experiment.value.alphas)) {
+        console.warn("FitnessChart: 'ga_config_json.fitness_history' not found or invalid, attempting to use 'alphas' array. This may not be optimal for performance chart.");
+        // This assumes alphas have 'iteration' and 'fitness_score' and are somewhat representative
+        return experiment.value.alphas
+          .filter(alpha => alpha.ga_metadata_json?.iteration !== undefined && alpha.fitness_score !== undefined)
+          .map(alpha => ({
+            iteration: alpha.ga_metadata_json.iteration,
+            fitness: alpha.fitness_score
+          }))
+          .sort((a,b) => a.iteration - b.iteration);
+      }
+      return []; // Default to empty if no suitable data found
+    });
 
     const progressPercentage = computed(() => {
       if (experiment.value && experiment.value.current_progress !== undefined && experiment.value.current_progress !== null) {
         return Math.max(0, Math.min(100, Number(experiment.value.current_progress)));
       }
       if (experiment.value?.status === 'COMPLETED') return 100;
-      if (experiment.value?.status === 'FAILED' || experiment.value?.status === 'CANCELLED') return experiment.value.current_progress || 0; // 保留失败时的进度
+      if (experiment.value?.status === 'FAILED' || experiment.value?.status === 'CANCELLED') return experiment.value.current_progress || 0;
       return 0;
     });
 
@@ -199,7 +232,8 @@ export default {
       getStatusTagType,
       getProgressStatus,
       formatDateTime,
-              // experimentId, // experiment.id is used in template, experimentId is for key or direct prop if needed
+      formattedFitnessHistory,
+      chartLoadingInitial, // Use this for the chart's loading prop
     };
   }
 };
@@ -231,12 +265,12 @@ export default {
 .el-statistic {
   text-align: center;
 }
-#alpha-performance-table-placeholder,
-#fitness-evolution-chart-placeholder {
-    min-height: 100px; /* 占位符最小高度 */
+/* Removed #alpha-performance-table-placeholder and #fitness-evolution-chart-placeholder specific styles */
+/* as components will define their own structure */
+.chart-initial-loading { /* For the text shown before chart component has data */
+    min-height: 100px;
     padding: 20px;
-    border: 1px dashed #dcdfe6;
-    border-radius: 4px;
-    margin-top: 10px;
+    text-align: center;
+    color: #909399;
 }
 </style>
