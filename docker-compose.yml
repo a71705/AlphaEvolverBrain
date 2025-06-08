@@ -12,84 +12,117 @@ services:
       - ./.env # 从项目根目录的 .env 文件加载环境变量
     environment:
       # LOG_LEVEL: ${LOG_LEVEL:-INFO} # 可选: 如果 .env 中未定义 LOG_LEVEL, 则使用 INFO 作为默认值
-      # 其他特定于此服务的环境变量可以在此覆盖 .env 文件中的值，但不推荐用于敏感数据
       PYTHONUNBUFFERED: 1 # 确保Python日志和print直接输出，便于Docker日志查看和调试
     volumes:
       - ./app:/app # 将本地app目录挂载到容器的/app目录 (主要用于开发时的代码热重载)
       - alpha_db_data:/app/data # SQLite数据库持久化卷 (路径应与DATABASE_URL环境变量对应)
     depends_on: # 定义服务启动依赖顺序
       - redis
-      # 如果使用外部数据库服务 (如PostgreSQL)，应在此添加依赖:
-      # - postgres_db
+      # - postgres_db # 如果使用外部数据库服务 (如PostgreSQL)，应在此添加依赖
     restart: unless-stopped # 重启策略: 除非手动停止，否则容器在退出时会自动重启
-    networks: # DEV-035: 明确指定网络，确保所有服务在同一网络
+    networks:
       - app_network
+    healthcheck: # (DEV-039 新增) Web服务的健康检查配置
+      # test: 定义如何检查容器健康状态的命令。
+      # CMD-SHELL: 在容器的默认shell中执行命令。
+      # 'curl -f http://localhost:8000/ || exit 1':
+      #   尝试访问应用的根路径。FastAPI的根路径通常在健康时返回200 OK。
+      #   '-f' 使curl在HTTP错误时不输出内容并返回错误码22。
+      #   '|| exit 1' 确保如果curl因任何原因失败 (例如连接拒绝、超时、HTTP错误)，则健康检查命令以非零状态退出。
+      #   未来如果实现 /api/v1/health 端点，可以替换为:
+      #   test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
+      interval: 30s       # interval: 健康检查的频率，每30秒检查一次。
+      timeout: 10s        # timeout: 每次健康检查命令的超时时间，10秒内未响应则视为失败。
+      retries: 3          # retries: 连续3次检查失败后，容器才被标记为不健康。
+      start_period: 60s   # start_period: 容器启动后的最初60秒内不执行健康检查，给予应用充分的启动时间。
+                          # 对于需要编译或复杂初始化的应用，此时间可能需要更长。
 
   # Redis 服务: 用于 RQ 任务队列和可能的缓存
   redis:
     image: "redis:latest" # 使用官方最新的 Redis 镜像
     container_name: worldquant_alpha_redis
-    ports: # 通常Redis不直接暴露给主机，除非有特定调试需求或外部访问需求
+    ports:
       - "6379:6379" # 仅用于本地开发调试。生产环境通常不应暴露 Redis 端口到公网。
     volumes:
       - redis_data:/data # Redis 数据持久化卷
     restart: unless-stopped
     networks:
       - app_network
+    # healthcheck: # (可选) Redis 的健康检查示例
+    #   test: ["CMD", "redis-cli", "ping"] # 使用 redis-cli ping 命令检查 Redis 服务是否响应
+    #   interval: 15s
+    #   timeout: 5s
+    #   retries: 5
+    #   start_period: 30s
 
   # Worker 服务: 运行 RQ (Redis Queue) Worker，处理后台任务 (如遗传算法)
   worker:
-    build: . # 与 web 服务使用相同的 Dockerfile
+    build: .
     container_name: worldquant_alpha_worker
-    # command: 指定容器启动时执行的命令。
-    # -u ${REDIS_URL:-redis://redis:6379/0}: Worker 连接到的 Redis URL。
-    #   使用环境变量插值，如果 REDIS_URL 在 .env 文件中定义，则使用该值；否则使用默认值。
-    # "default-queue" "high-priority-queue": Worker 监听的队列名称列表。
     command: ["rq", "worker", "-u", "${REDIS_URL:-redis://redis:6379/0}", "default-queue", "high-priority-queue"]
     env_file:
-      - ./.env # 从 .env 文件加载环境变量
+      - ./.env
     environment:
-      # LOG_LEVEL: ${LOG_LEVEL:-INFO} # 同上, 可选的默认值覆盖
       PYTHONUNBUFFERED: 1
-    depends_on: # Worker 依赖 Redis 和 Web 服务
+    depends_on:
       - redis
-      - web # 确保Web服务（可能负责创建DB表结构或进行其他初始化）先启动
+      - web
     restart: unless-stopped
-    volumes: # Worker 服务通常也需要访问应用代码和数据卷
-      - ./app:/app # (主要用于开发时的代码同步)
-      - alpha_db_data:/app/data # 共享数据库卷
+    volumes:
+      - ./app:/app
+      - alpha_db_data:/app/data
     networks:
       - app_network
+    healthcheck: # (DEV-039 新增) Worker服务的健康检查配置
+      # test: 检查 RQ worker 是否能够连接到 Redis 并获取信息。
+      # 'rq info -u $$REDIS_URL --raw || exit 1':
+      #   'rq info' 是 RQ 的命令行工具，用于获取队列和worker的信息。
+      #   '-u $$REDIS_URL' 指定 Redis 连接 URL。在 CMD-SHELL 中，环境变量需要用 '$$VAR' 或 '$${VAR}' 的形式来转义，
+      #     以便 Compose 文件解析器不会尝试替换它，而是将其字面值传递给容器的 shell，由 shell 解析该环境变量。
+      #     或者，如果 REDIS_URL 对 worker 总是固定的 (例如，通过 env_file 或 environment 设置为 redis://redis:6379/0)，
+      #     也可以直接硬编码: "rq info -u redis://redis:6379/0 --raw || exit 1"
+      #   '--raw' 使输出更简洁，便于脚本处理 (虽然这里只是检查退出码)。
+      #   '|| exit 1' 确保如果 'rq info' 命令失败 (例如无法连接Redis，或rq命令本身不存在)，健康检查以非零状态退出。
+      #   注意: 此检查要求容器内已安装 'rq' 命令行工具，并且 REDIS_URL 环境变量对健康检查命令的执行环境可见。
+      test: ["CMD-SHELL", "rq info -u $$REDIS_URL --raw || exit 1"]
+      interval: 45s       # interval: Worker 的健康检查间隔可以稍长，设为45秒。
+      timeout: 15s        # timeout: 检查命令的超时时间。
+      retries: 3          # retries: 连续3次失败则认为不健康。
+      start_period: 75s   # start_period: Worker 可能有更长的初始化/连接 Redis 的时间，设为75秒。
 
   # RQ Dashboard 服务 (用于监控 RQ 任务队列)
   rq_dashboard:
-    image: "rq/rq-dashboard:latest" # 使用官方的 rq-dashboard 镜像
+    image: "rq/rq-dashboard:latest"
     container_name: worldquant_alpha_rq_dashboard
     ports:
-      - "9181:9181" # 仪表盘访问端口: 主机端口:容器端口
+      - "9181:9181"
     environment:
-      # RQ_REDIS_URL: RQ Dashboard 连接 Redis 所需的 URL。
-      # 此处直接使用 redis 服务名，因为它在同一个 Docker 网络中。
-      # 使用环境变量插值，如果 REDIS_URL 在 .env 中定义，则优先使用该值。
       RQ_REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
     depends_on:
-      - redis # 依赖 Redis 服务
+      - redis
     restart: unless-stopped
     networks:
       - app_network
+    # healthcheck: # (可选) RQ Dashboard 的健康检查
+    #   # 检查 Dashboard 是否能正常响应 HTTP 请求 (假设其自身是健康的如果能访问)
+    #   # 注意: Dashboard 自身可能没有专门的 /health 端点，根路径 '/' 通常可以。
+    #   test: ["CMD-SHELL", "curl -f http://localhost:9181/ || exit 1"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 30s # Dashboard 启动通常较快
+
 
 # 定义命名卷 (named volumes)，用于数据持久化
-# 使用 local驱动，表示数据存储在运行 Docker 的主机的特定目录中 (由 Docker 管理)
 volumes:
-  redis_data: # Redis 数据卷声明
+  redis_data:
     driver: local
-  alpha_db_data: # SQLite 数据库文件卷声明 (或其他数据库数据)
+  alpha_db_data:
     driver: local
 
 # 定义自定义网络 (networks)
-# 确保所有需要相互通信的服务都在同一个自定义网络中。
-# Docker Compose 默认会创建一个网络，但显式定义可以提供更好的控制和可读性。
 networks:
-  app_network: # 自定义网络的名称
-    driver: bridge # 使用默认的 bridge 网络驱动
-    name: wq_alpha_evolution_network # (可选) 在 Docker 主机上实际创建的网络名称。不指定则自动生成。
+  app_network:
+    driver: bridge
+    name: wq_alpha_evolution_network
