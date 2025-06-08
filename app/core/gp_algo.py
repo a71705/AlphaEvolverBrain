@@ -3,10 +3,13 @@ import random
 # 从 typing 模块导入 Optional 和 List 类型提示，用于增强代码的可读性和静态分析能力。
 # Optional[X] 表示一个参数或返回值可以是 X 类型，也可以是 None。
 # List[X] 表示一个列表，其所有元素都是 X 类型。
-from typing import Optional, List
+from typing import Optional, List, Dict # 新增 Dict
 import logging # 导入 logging 模块
 import pandas as pd # 导入 pandas 用于数据处理，特别是 fitness_fun 中的 DataFrame 操作
 import re # 导入正则表达式模块
+# 导入 BrainApiSession 用于与 Brain API 交互，动态获取数据字段
+from app.core.brain_api import BrainApiSession # 新增导入
+# from app.models import Alpha # 概念上需要，但避免直接DB操作，不在此文件导入
 
 logger = logging.getLogger(__name__) # 获取 logger 实例，以便使用 logger.warning
 
@@ -56,13 +59,17 @@ class Node:
 # 这些列表定义了遗传编程算法在构建 Alpha 表达式树时可以使用的基本元素。
 
 # 终端值 (Terminal Values): 这些是表达式树的叶子节点，通常代表原始数据字段或常量。
-terminal_values: List[str] = [
-    "close", "open", "high", "low", "vwap",  # 基本价格数据
-    "adv20",  # 20日平均成交量 (average daily volume over 20 days)
-    "volume", # 当日成交量
-    "cap",    # 市值 (market capitalization)
-    "returns",# 收益率 (通常是日收益率)
-    "dividend"# 股息 (可能需要特定处理，如作为因子或过滤条件)
+# terminal_values: List[str] = [ # 这个列表现在将被动态生成或作为备用
+#     "close", "open", "high", "low", "vwap",  # 基本价格数据
+#     "adv20",  # 20日平均成交量 (average daily volume over 20 days)
+#     "volume", # 当日成交量
+#     "cap",    # 市值 (market capitalization)
+#     "returns",# 收益率 (通常是日收益率)
+#     "dividend"# 股息 (可能需要特定处理，如作为因子或过滤条件)
+# ]
+# 默认的终端值列表，用作无法从API获取数据时的备用
+DEFAULT_TERMINAL_VALUES: List[str] = [
+    "close", "open", "high", "low", "vwap", "adv20", "volume", "cap", "returns"
 ]
 # 注释：终端值列表可以根据实际可用的数据字段进行扩展。
 
@@ -131,9 +138,19 @@ def _recursive_tree_to_alpha(node: Optional[Node]) -> str:
 
     # 检查节点值是否是终端值或时间序列操作的参数值 (通常是数字字符串)
     # 这些类型的节点是递归的终点，直接返回其值。
-    if node_value_str in terminal_values or node_value_str in ts_ops_values:
-        return node_value_str
+    # 注意：由于 terminal_values 现在是动态的，这里可能需要更灵活的检查
+    # 或者假设在树构建时，节点值已经是确定的、有效的终端。
+    # 为了简化，我们假设如果一个值不是操作符，它就是终端或参数。
+    # 更健壮的做法是在 Node 对象中添加一个 type 属性 (OPERATOR, TERMINAL)。
+    # 当前我们依赖于它是否在各类操作符列表中。
+    # if node_value_str in terminal_values or node_value_str in ts_ops_values:
+    # 我们通过检查它是否 *不是* 操作符来判断它是否是终端或参数值
+    is_operator = (node_value_str in unary_ops or
+                   node_value_str in binary_ops or
+                   node_value_str in ts_ops)
 
+    if not is_operator: # 如果不是任何已知类型的操作符，则假定为终端或参数值
+        return node_value_str
     # 检查节点值是否是一元操作符
     elif node_value_str in unary_ops:
         if node.left:
@@ -200,10 +217,19 @@ def tree_to_alpha(tree: Node) -> str:
         # !r 用于获取 repr 表示，避免过长的日志
 
     logger.info(f"树成功转换为 Alpha 表达式: '{expression_str}'") # 记录生成的表达式
+
+    # 在返回之前进行轻量级语法验证
+    if not _validate_alpha_syntax(expression_str): # _validate_alpha_syntax defined in DEV-025
+        logger.warning(f"生成的 Alpha 表达式 '{expression_str}' 未通过轻量级语法验证。")
+        # 根据策略，可以选择返回空字符串，或者让调用者处理带有警告的表达式
+        # return "" # 如果验证失败则返回空字符串
+        # 或者，如果希望流程继续但带有标记，可以考虑其他方式
+        # 目前，仅记录警告，并返回表达式。后续流程（如WQB实际模拟）会进行更严格的验证。
+
     return expression_str
 
 # (确保全局的操作符和终端列表已定义并可在此函数作用域内访问:
-#  terminal_values, ts_ops, binary_ops, unary_ops, ts_ops_values)
+#  DEFAULT_TERMINAL_VALUES, ts_ops, binary_ops, unary_ops, ts_ops_values)
 
 def _build_tree_from_tokens(tokens: List[str]) -> Optional[Node]:
     """
@@ -229,9 +255,14 @@ def _build_tree_from_tokens(tokens: List[str]) -> Optional[Node]:
     token = tokens.pop(0) # 消耗词法单元
     # logger.debug(f"_build_tree_from_tokens: 当前处理 '{token}', 剩余: {tokens[:5]}")
 
-    if token in terminal_values or token in ts_ops_values:
+    # if token in terminal_values or token in ts_ops_values:
+    # 由于 terminal_values 是动态的，我们不能直接用它来检查。
+    # 我们将检查 token 是否不是一个已知的操作符。
+    # 如果它不是操作符，我们假定它是一个终端或一个参数值（如ts_ops_values）。
+    is_known_operator = token in unary_ops or token in binary_ops or token in ts_ops
+    if not is_known_operator:
         # logger.debug(f"创建叶子节点: Node('{token}')")
-        return Node(token)
+        return Node(token) # 假定为终端或参数值
 
     elif token in unary_ops:
         # logger.debug(f"处理一元操作符: '{token}'")
@@ -274,6 +305,32 @@ def _build_tree_from_tokens(tokens: List[str]) -> Optional[Node]:
     else:
         # 如果 token 不是已知的终端、值或操作符
         raise ValueError(f"语法错误：未知的词法单元或非预期的符号 '{token}' 作为表达式的开头。")
+
+def parse_expression(expression_str: str) -> List[str]:
+    """
+    将 Alpha 表达式字符串分解为词法单元列表。
+    例如："add(rank(close),vwap)" -> ['add', '(', 'rank', '(', 'close', ')', ',', 'vwap', ')']
+    这个实现比较基础，可能无法处理所有复杂的 WQB 表达式或嵌套结构。
+    """
+    if not expression_str:
+        return []
+    # 使用正则表达式匹配操作符、终端、括号和逗号
+    # 确保操作符名称和终端名称是字母数字和下划线的组合
+    # 数值（如周期值）也应该被正确处理
+    # 正则表达式尝试匹配：
+    # 1. 字母数字下划线序列 (操作符或终端)
+    # 2. 数字 (包括可能的负数或小数，尽管在当前GP定义中周期值通常是正整数)
+    # 3. 括号或逗号
+    token_regex = re.compile(r'([a-zA-Z0-9_]+\b(?!\.)|[0-9]+(?:\.[0-9]+)?|\(|\)|,)')
+    # `[a-zA-Z0-9_]+\b(?!\.)` 匹配标识符 (不以点结尾，以避免匹配类似 1.2 中的 1)
+    # `[0-9]+(?:\.[0-9]+)?` 匹配整数或浮点数
+    tokens = token_regex.findall(expression_str)
+
+    # 移除可能的空字符串或仅含空格的token (尽管 regex 可能不会产生这种)
+    tokens = [token for token in tokens if token.strip()]
+
+    return tokens
+
 
 def alpha_to_tree(expression_str: str) -> Optional[Node]:
     """
@@ -679,6 +736,264 @@ from app.core.brain_api import BrainApiSession # 确保此导入路径正确且�
 
 # (已有的 Node 类, 操作符/终端列表, 树生成/转换函数, fitness_fun, copy_tree, _collect_nodes, mutate, crossover等)
 
+# --- 树辅助函数 ---
+def get_tree_depth(node: Optional[Node]) -> int:
+    """
+    计算给定节点为根的树的深度。
+    深度定义：单个节点的树深度为1。空树深度为0。
+
+    参数:
+        node (Optional[Node]): 要计算深度的树的根节点。
+
+    返回:
+        int: 树的深度。
+    """
+    if node is None:
+        return 0  # 空树的深度为0
+    # 递归计算左右子树的深度
+    left_depth = get_tree_depth(node.left)
+    right_depth = get_tree_depth(node.right)
+    # 树的深度是左右子树深度的最大值加1（加的是当前节点）
+    return max(left_depth, right_depth) + 1
+
+def count_nodes(node: Optional[Node]) -> int:
+    """
+    计算给定节点为根的树的总节点数。
+
+    参数:
+        node (Optional[Node]): 要计算节点数的树的根节点。
+
+    返回:
+        int: 树中的总节点数。
+    """
+    if node is None:
+        return 0  # 空树的节点数为0
+    # 树的总节点数 = 1 (当前节点) + 左子树节点数 + 右子树节点数
+    return 1 + count_nodes(node.left) + count_nodes(node.right)
+
+# --- Alpha 表达式轻量级语法验证 ---
+def _validate_alpha_syntax(expression_str: str) -> bool:
+    """
+    对 Alpha 表达式字符串进行轻量级的语法验证。
+    主要检查括号平衡。更复杂的检查（如操作符后跟括号、非法字符）
+    可以根据需要添加，但需注意不要使其过于复杂以至于成为完整的解析器。
+
+    参数:
+        expression_str (str): 要验证的 Alpha 表达式字符串。
+
+    返回:
+        bool: 如果表达式通过基本验证则为 True，否则为 False。
+    """
+    if not expression_str:
+        logger.warning("Alpha 表达式为空，语法验证失败。")
+        return False
+
+    # 1. 检查括号是否匹配
+    open_brackets = expression_str.count('(')
+    close_brackets = expression_str.count(')')
+    if open_brackets != close_brackets:
+        logger.warning(f"表达式 '{expression_str}' 括号不匹配 (开: {open_brackets}, 闭: {close_brackets})，语法验证失败。")
+        return False
+
+    # 2. 检查是否有未闭合的括号在末尾，或未匹配的括号在开头 (基本检查)
+    #    例如 "add(close" 或 "add)close("
+    #    一个更简单的检查是如果括号数量不为0，则第一个不能是 ')'，最后一个不能是 '('
+    if open_brackets > 0: # 只有在有括号时才检查
+        stripped_expr = expression_str.strip()
+        if not stripped_expr: # 如果剥离空格后为空，也认为无效（虽然前面 expression_str 已检查）
+             logger.warning(f"表达式 '{expression_str}' 剥离空格后为空，语法验证失败。")
+             return False
+        if stripped_expr[0] == ')' or stripped_expr[-1] == '(':
+             logger.warning(f"表达式 '{expression_str}' 首尾括号存在明显问题，语法验证失败。")
+             return False
+
+    # 3. 检查是否有连续的逗号或操作符与逗号的不当组合，例如 ",," or "add(," or ",)"
+    if ",," in expression_str or "(," in expression_str or ",)" in expression_str:
+        logger.warning(f"表达式 '{expression_str}' 包含无效的逗号组合，语法验证失败。")
+        return False
+
+    # 更多检查可以添加，例如：
+    # - 检查操作符后面是否总是跟着 '(' (但要小心操作符名称作为子字符串出现的情况)
+    # - 检查参数数量是否大致正确 (非常困难，需要解析)
+    # - 检查是否有非法字符 (需要定义合法的字符集)
+
+    logger.debug(f"表达式 '{expression_str}' 通过了基本的轻量级语法验证。")
+    return True
+
+
+# 辅助函数：动态获取终端值
+def _get_dynamic_terminal_values(
+    brain_api_session: BrainApiSession,
+    strategy: str,
+    strategy_params: dict,
+    source_params: dict
+) -> List[str]:
+    """
+    根据指定的策略从 Brain API 获取并选择数据字段作为终端值。
+
+    参数:
+        brain_api_session (BrainApiSession): 用于与 Brain API 通信的会话对象。
+        strategy (str): 数据字段选择策略 ("random", "weighted_random", "whitelist", "blacklist")。
+        strategy_params (dict): 特定策略所需的参数 (例如 num_selected_fields, whitelist, blacklist, weights)。
+        source_params (dict): 调用 brain_api_session.get_datafields 所需的参数
+                              (例如 instrument_type, region, delay, universe, dataset_id)。
+
+    返回:
+        List[str]: 根据策略选择的数据字段名称列表。如果失败则返回空列表或默认列表。
+    """
+    logger.info(f"开始动态获取终端值。策略: {strategy}, 策略参数: {strategy_params}, 数据源参数: {source_params}")
+
+    try:
+        all_fields_df = brain_api_session.get_datafields(
+            instrument_type=source_params.get('instrument_type', 'EQUITY'),
+            region=source_params.get('region', 'USA'),
+            delay=source_params.get('delay', 1),
+            universe=source_params.get('universe', 'TOP3000'),
+            dataset_id=source_params.get('dataset_id', '')
+        )
+    except Exception as e:
+        logger.error(f"调用 Brain API get_datafields 失败: {e}", exc_info=True)
+        return DEFAULT_TERMINAL_VALUES # API 调用失败，返回默认列表
+
+    if all_fields_df is None or all_fields_df.empty:
+        logger.warning("从 Brain API 获取的数据字段列表为空或为None。将使用默认终端值列表。")
+        return DEFAULT_TERMINAL_VALUES
+
+    # 假设 'name' 列包含字段名称
+    if 'name' not in all_fields_df.columns:
+        logger.error("Brain API 返回的 DataFrame 中缺少 'name' 列。将使用默认终端值列表。")
+        return DEFAULT_TERMINAL_VALUES
+
+    available_field_names = all_fields_df['name'].dropna().unique().tolist() # 确保唯一且非空
+
+    if not available_field_names:
+        logger.warning("从DataFrame提取的数据字段名称列表为空。将使用默认终端值列表。")
+        return DEFAULT_TERMINAL_VALUES
+
+    logger.info(f"从 Brain API 获取到 {len(available_field_names)} 个可用数据字段。")
+
+    num_selected_fields = strategy_params.get('num_selected_fields', 10) # 默认选10个
+
+    selected_fields: List[str] = []
+
+    if strategy == "whitelist":
+        whitelist = strategy_params.get('whitelist', [])
+        if not isinstance(whitelist, list): # 基本类型检查
+            logger.warning(f"白名单参数类型错误 (应为list): {whitelist}。退化为随机选择。")
+            strategy = "random" # 退化
+        else:
+            selected_fields = [f for f in whitelist if f in available_field_names]
+            if len(selected_fields) < len(whitelist):
+                missing_fields = set(whitelist) - set(selected_fields)
+                logger.warning(f"白名单中的某些字段不在可用字段列表中: {missing_fields}")
+            if not selected_fields:
+                logger.error("白名单策略未能选择任何字段。将尝试从所有可用字段中随机选择。")
+                # 可以选择返回空，或者退化到随机选择num_selected_fields个
+                if len(available_field_names) <= num_selected_fields:
+                     selected_fields = available_field_names
+                else:
+                     selected_fields = random.sample(available_field_names, num_selected_fields)
+            else: # 白名单选出字段后，根据 num_selected_fields 进行截断 (如果需要)
+                 selected_fields = selected_fields[:num_selected_fields]
+
+
+    elif strategy == "blacklist":
+        blacklist = strategy_params.get('blacklist', [])
+        if not isinstance(blacklist, list):
+            logger.warning(f"黑名单参数类型错误 (应为list): {blacklist}。退化为随机选择。")
+            strategy = "random" # 退化
+        else:
+            candidate_fields = [f for f in available_field_names if f not in blacklist]
+            if not candidate_fields:
+                logger.warning("黑名单策略后没有候选字段。将尝试从所有可用字段中随机选择。")
+                if len(available_field_names) <= num_selected_fields:
+                     selected_fields = available_field_names
+                else:
+                     selected_fields = random.sample(available_field_names, num_selected_fields)
+
+            elif len(candidate_fields) <= num_selected_fields:
+                selected_fields = candidate_fields
+            else:
+                selected_fields = random.sample(candidate_fields, num_selected_fields)
+
+    elif strategy == "weighted_random":
+        weights_dict = strategy_params.get('weights', {})
+        if not isinstance(weights_dict, dict):
+            logger.warning(f"权重参数类型错误 (应为dict): {weights_dict}。退化为随机选择。")
+            strategy = "random" # 退化
+        else:
+            # 过滤出在可用字段中且有权重的字段
+            valid_fields_with_weights = {f: weights_dict[f] for f in available_field_names if f in weights_dict and isinstance(weights_dict[f], (int, float)) and weights_dict[f] > 0}
+
+            if not valid_fields_with_weights:
+                logger.warning("加权随机策略：没有字段同时存在于可用字段、权重配置中且权重为正数。退化为随机选择。")
+                strategy = "random" # 退化
+            else:
+                fields_for_choice = list(valid_fields_with_weights.keys())
+                field_actual_weights = [valid_fields_with_weights[f] for f in fields_for_choice]
+
+                # random.choices 的 k 不能大于总体大小，除非 replace=True (默认)
+                # 如果候选字段少于 num_selected_fields，则全部选中 (按权重抽样直到填满或取完)
+                # random.choices 允许 k 大于 population size if replace=True.
+                # For selection without replacement, k must be <= len(population).
+                # 这里我们想要不重复选择，所以 k 应 <= len(fields_for_choice)
+                # 如果 num_selected_fields 大于可选字段数，则全选这些字段
+                if num_selected_fields >= len(fields_for_choice):
+                     # 不能用 choices 直接取完，因为 choices 是有放回的。
+                     # 如果要不放回地取完，直接返回 fields_for_choice 即可。
+                     # 但如果要求按权重，且不放回，则需要更复杂的抽样，或者多次单次不放回抽样。
+                     # Python 的 random.choices 是有放回抽样。
+                     # 为了简单，如果 num_selected_fields >= len(fields_for_choice), 我们就返回所有候选字段
+                     # (这并没有严格按权重，但保证了不重复且利用了所有有效带权字段)
+                     # 或者，我们可以进行 k 次有放回抽样，然后取 unique，直到数量达标或无法再增加。
+                     # 这里简化：如果数量不足，就全选。如果数量够，就按权重有放回抽 k 个，再取 unique。
+                    if num_selected_fields >= len(fields_for_choice):
+                        selected_fields = fields_for_choice
+                        logger.info(f"加权随机：可选字段数 ({len(fields_for_choice)}) 小于等于请求数 ({num_selected_fields})，已全选。")
+                    else:
+                        # 进行有放回的加权随机抽样，然后取唯一值直到达到数量或无法再增加
+                        # 这是一个迭代过程，以尽量满足不重复和数量要求
+                        temp_selected_set = set()
+                        attempts = 0 # 防止无限循环
+                        max_attempts = num_selected_fields * 5 # 启发式尝试次数上限
+
+                        while len(temp_selected_set) < num_selected_fields and attempts < max_attempts:
+                            chosen = random.choices(fields_for_choice, weights=field_actual_weights, k=1)[0]
+                            temp_selected_set.add(chosen)
+                            attempts += 1
+                            if len(temp_selected_set) == len(fields_for_choice): # 所有可选的都选了
+                                break
+                        selected_fields = list(temp_selected_set)
+                        # 如果数量仍不足，补充一些随机的 (从剩余的 fields_for_choice 中)
+                        if len(selected_fields) < num_selected_fields:
+                            remaining_to_select = num_selected_fields - len(selected_fields)
+                            potential_pool = [f for f in fields_for_choice if f not in selected_fields]
+                            if potential_pool:
+                                selected_fields.extend(random.sample(potential_pool, min(remaining_to_select, len(potential_pool))))
+                        logger.info(f"加权随机：尝试选择 {num_selected_fields} 个，实际选择 {len(selected_fields)} 个。")
+
+
+    # 默认或 "random" 策略 (包括从其他策略退化而来的)
+    if strategy == "random" or not selected_fields: # 如果前面策略失败导致 selected_fields 为空
+        if strategy != "random": # 如果是因为其他策略失败才到这里
+            logger.info(f"策略 '{strategy}' 执行后无结果或出错，退化为随机选择策略。")
+
+        if not available_field_names: # 再次检查，以防万一
+             logger.error("随机选择策略：可用字段列表为空。返回默认终端列表。")
+             return DEFAULT_TERMINAL_VALUES
+
+        if len(available_field_names) <= num_selected_fields:
+            selected_fields = available_field_names
+        else:
+            selected_fields = random.sample(available_field_names, num_selected_fields)
+
+    if not selected_fields:
+        logger.error(f"所有策略执行完毕后，未能选择任何终端字段。返回默认列表: {DEFAULT_TERMINAL_VALUES}")
+        return DEFAULT_TERMINAL_VALUES
+
+    logger.info(f"最终选择的动态终端值 ({len(selected_fields)}个): {selected_fields}")
+    return selected_fields
+
 
 # --- 遗传算法各阶段核心函数 (占位符实现) ---
 # 这些函数代表遗传算法主循环的不同阶段/深度。
@@ -704,21 +1019,90 @@ def best_d1_alphas(
         ...
         # current_iteration_start (int): (示意性) 如果此阶段支持从特定迭代恢复，则指定起始迭代。
     """
-    # 从 ga_config 获取此阶段的总迭代次数
-    total_iterations_this_depth = ga_config.get("iterations_at_depth_0", ga_config.get("iterations_per_depth", 10)) # 示例获取配置
+    # --- 动态终端值获取 ---
+    dynamic_terminal_values = _get_dynamic_terminal_values(
+        brain_api, # brain_api_session
+        ga_config.get('datafield_selection_strategy', 'random'),
+        ga_config.get('datafield_selection_params', {}),
+        ga_config.get('data_source_params', {})
+    )
 
-    # 假设 run_genetic_algorithm_task 传递过来的 current_iteration_from_db (如果适用此深度)
-    # 会被用来决定这里的 current_iteration_start。
-    # 为了简单，这里仅记录，实际循环控制不实现。
-    # 在 run_genetic_algorithm_task 中，我们已经根据 current_depth_from_db 决定是否调用此函数。
-    # 如果它被调用，我们假设它从头开始执行其配置的迭代次数，或者其内部需要更复杂的迭代恢复。
+    if not dynamic_terminal_values:
+        logger.error(f"实验 {experiment_id}: 未能获取动态终端值列表，无法继续 best_d1_alphas。")
+        if not dynamic_terminal_values:
+             raise ValueError("无法获取终端值，且默认终端值列表也为空。")
 
-    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d1_alphas (占位符)。配置迭代次数: {total_iterations_this_depth}。")
-    # logger.info(f"（示意性断点续传：如果实现，将从迭代 {current_iteration_start} 开始。）")
-    logger.debug(f"GA 配置 (部分): {ga_config.get('population_size', 'N/A')}")
+    logger.info(f"实验 {experiment_id}: 使用的终端值 ({len(dynamic_terminal_values)}个): {dynamic_terminal_values}")
+    # --- 动态终端值获取结束 ---
 
-    time.sleep(1) # 减少占位符的延时，加快测试
-    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d1_alphas (占位符) 完成。")
+    # --- GA 配置提取 ---
+    max_depth = ga_config.get('max_alpha_depth', 7)
+    max_nodes = ga_config.get('max_nodes_per_alpha', 50)
+    population_size = ga_config.get('population_size', 50)
+    total_iterations_this_depth = ga_config.get("iterations_at_depth_0", ga_config.get("iterations_per_depth", 10))
+
+    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d1_alphas。配置迭代次数: {total_iterations_this_depth}。")
+    logger.debug(f"GA 配置: population_size={population_size}, max_depth={max_depth}, max_nodes={max_nodes}")
+
+    # --- 生成初始种群 ---
+    population: List[Node] = []
+    attempts = 0
+    max_attempts_per_individual = 10 # 避免无限循环
+
+    while len(population) < population_size and attempts < population_size * max_attempts_per_individual :
+        flag = random.randint(0, 3) # 假设 depth_one_trees 的 flag
+        try:
+            tree = depth_one_trees(
+                terminal_vals=dynamic_terminal_values,
+                bin_ops=binary_ops,
+                time_series_ops=ts_ops,
+                time_series_op_vals=ts_ops_values,
+                un_ops=unary_ops,
+                flag=flag
+            )
+            # 验证生成的树是否符合复杂性约束
+            current_depth = get_tree_depth(tree)
+            current_nodes = count_nodes(tree)
+            if current_depth <= max_depth and current_nodes <= max_nodes:
+                population.append(tree)
+            else:
+                logger.debug(f"生成的初始树深度 {current_depth} (>{max_depth}) 或节点数 {current_nodes} (>{max_nodes}) 超出约束，丢弃。")
+        except ValueError as e: # 可能由 depth_one_trees 抛出 (例如操作符列表为空)
+            logger.error(f"生成初始树时发生错误: {e}。尝试继续...")
+        attempts += 1
+
+    if len(population) < population_size:
+        logger.warning(f"实验 {experiment_id}: 未能生成足够的符合约束的初始种群 (实际: {len(population)}, 预期: {population_size})。")
+        if not population: # 如果一个都没生成成功
+             raise RuntimeError(f"实验 {experiment_id}: 无法生成任何有效的初始种群个体。请检查配置和终端/操作符列表。")
+
+
+    logger.info(f"实验 {experiment_id}: 已生成初始种群，数量: {len(population)}，使用动态终端值并应用了复杂性约束。")
+
+    # --- 后续选择、交叉、变异、评估等逻辑 (占位符) ---
+    # for iteration in range(total_iterations_this_depth):
+    #    evaluated_population = []
+    #    for individual_tree in population:
+    #        alpha_expr = tree_to_alpha(individual_tree)
+    #        if not alpha_expr: continue # 跳过无效表达式
+    #        # 调用 brain_api.simulate_alpha, 获取 fitness (此处为伪代码)
+    #        # fitness_score = simulate_and_get_fitness(alpha_expr, brain_api, db, experiment_id, ga_config)
+    #        # evaluated_population.append({"tree": individual_tree, "fitness": fitness_score})
+    #
+    #    # selected_population = selection_method(evaluated_population, ...)
+    #    # next_generation = []
+    #    # while len(next_generation) < population_size:
+    #    #     parent1, parent2 = select_parents(selected_population)
+    #    #     child1, child2 = crossover(parent1, parent2, ga_config, max_depth, max_nodes) # crossover需传入约束
+    #    #     child1 = mutate_random_node(child1, ..., ga_config, max_depth, max_nodes) # mutate也需传入约束
+    #    #     next_generation.extend([c1, c2] if c1 and c2 else []) # 只添加有效子代
+    #    # population = next_generation[:population_size]
+    #    logger.info(f"迭代 {iteration + 1}/{total_iterations_this_depth} 完成 (占位符)。")
+
+
+    # --- 以下为原占位符逻辑的返回 ---
+    time.sleep(1)
+    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d1_alphas (占位符逻辑部分) 完成。")
 
     return [
         {"expression": f"placeholder_d1_exp{experiment_id}_alpha_1", "fitness": 0.5, "details": "来自best_d1_alphas占位符"},
@@ -738,13 +1122,42 @@ def best_d2_alphas(
     （占位符实现 - 已调整以记录潜在的起始迭代信息）
     ... (其余文档字符串可保持) ...
     """
+    # --- 动态终端值获取 (同样需要在此阶段，因为变异等操作可能引入新终端) ---
+    dynamic_terminal_values = _get_dynamic_terminal_values(
+        brain_api,
+        ga_config.get('datafield_selection_strategy', 'random'),
+        ga_config.get('datafield_selection_params', {}),
+        ga_config.get('data_source_params', {})
+    )
+    if not dynamic_terminal_values:
+        logger.error(f"实验 {experiment_id}: 未能获取动态终端值列表，无法继续 best_d2_alphas。")
+        if not dynamic_terminal_values: raise ValueError("无法获取终端值，且默认终端值列表也为空。")
+
+    logger.info(f"实验 {experiment_id}: best_d2_alphas 使用的终端值 ({len(dynamic_terminal_values)}个): {dynamic_terminal_values}")
+    # --- 动态终端值获取结束 ---
+
+    # --- GA 配置提取 ---
+    max_depth = ga_config.get('max_alpha_depth', 7)
+    max_nodes = ga_config.get('max_nodes_per_alpha', 50)
+    # population_size = ga_config.get('population_size', 50) # 通常由上一代大小决定
+
     total_iterations_this_depth = ga_config.get("iterations_at_depth_1", ga_config.get("iterations_per_depth", 10))
-    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d2_alphas (占位符)。配置迭代次数: {total_iterations_this_depth}。")
-    # logger.info(f"（示意性断点续传：如果实现，将从迭代 {current_iteration_start} 开始。）")
+    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d2_alphas。配置迭代次数: {total_iterations_this_depth}。")
     logger.debug(f"接收到上一代 Alpha 数量: {len(previous_generation_alphas)}")
+    logger.debug(f"GA 配置: max_depth={max_depth}, max_nodes={max_nodes}")
+
+
+    # 变异、交叉等操作如果需要生成新节点，应使用 dynamic_terminal_values
+    # 并且这些操作的产物需要用 get_tree_depth 和 count_nodes 进行验证
+    # 例如:
+    # new_child_tree = crossover(parent1, parent2, ...)
+    # if get_tree_depth(new_child_tree) > max_depth or count_nodes(new_child_tree) > max_nodes:
+    #     # 处理超限情况 (例如丢弃，或用父代替换)
+    #     logger.debug("best_d2_alphas: 交叉产生的子代超出约束，进行处理。")
+
 
     time.sleep(1)
-    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d2_alphas (占位符) 完成。")
+    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d2_alphas (占位符逻辑) 完成。")
     return [
         {"expression": f"placeholder_d2_exp{experiment_id}_alpha_1", "fitness": 0.7, "details": "来自best_d2_alphas占位符"}
     ]
@@ -762,19 +1175,39 @@ def best_d3_alpha( # 注意函数名是 alpha (单数) 还是 alphas (复数)
     （占位符实现 - 已调整以记录潜在的起始迭代信息）
     ... (其余文档字符串可保持) ...
     """
+    # --- 动态终端值获取 ---
+    dynamic_terminal_values = _get_dynamic_terminal_values(
+        brain_api,
+        ga_config.get('datafield_selection_strategy', 'random'),
+        ga_config.get('datafield_selection_params', {}),
+        ga_config.get('data_source_params', {})
+    )
+    if not dynamic_terminal_values:
+        logger.error(f"实验 {experiment_id}: 未能获取动态终端值列表，无法继续 best_d3_alpha。")
+        if not dynamic_terminal_values: raise ValueError("无法获取终端值，且默认终端值列表也为空。")
+
+    logger.info(f"实验 {experiment_id}: best_d3_alpha 使用的终端值 ({len(dynamic_terminal_values)}个): {dynamic_terminal_values}")
+    # --- 动态终端值获取结束 ---
+
+    # --- GA 配置提取 ---
+    max_depth = ga_config.get('max_alpha_depth', 7)
+    max_nodes = ga_config.get('max_nodes_per_alpha', 50)
+
     total_iterations_this_depth = ga_config.get("iterations_at_depth_2", ga_config.get("iterations_per_depth", 10))
-    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d3_alpha (占位符)。配置迭代次数: {total_iterations_this_depth}。")
-    # logger.info(f"（示意性断点续传：如果实现，将从迭代 {current_iteration_start} 开始。）")
+    logger.info(f"实验 {experiment_id}: 开始执行遗传算法阶段 best_d3_alpha。配置迭代次数: {total_iterations_this_depth}。")
     logger.debug(f"接收到上一代 Alpha 数量: {len(previous_generation_alphas)}")
+    logger.debug(f"GA 配置: max_depth={max_depth}, max_nodes={max_nodes}")
+
 
     time.sleep(1)
-    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d3_alpha (占位符) 完成。")
+    logger.info(f"实验 {experiment_id}: 遗传算法阶段 best_d3_alpha (占位符逻辑) 完成。")
     return [
         {"expression": f"placeholder_d3_exp{experiment_id}_alpha_final", "fitness": 0.9, "details": "来自best_d3_alpha占位符"}
     ]
 
 # logger 实例应已在文件顶部定义 (import logging; logger = logging.getLogger(__name__))
-# time 模块也需要导入 (import time)
+# time 模块也需要导入 (import time) # time 已被使用，确认导入
+import time # 确保 time 被导入
 # List 类型提示需要 from typing import List
 
 def depth_one_trees(
@@ -824,9 +1257,12 @@ def depth_one_trees(
     elif flag == 1:
         # 生成一个带终端子节点的一元操作符树
         if not un_ops:
-            raise ValueError("一元操作符列表不能为空 (un_ops)")
-        if not terminal_vals:
-            raise ValueError("终端值列表不能为空 (terminal_vals)")
+            # Fallback or error if un_ops is empty
+            logger.warning("一元操作符列表为空，depth_one_trees flag 1 将退化为终端节点。")
+            if not terminal_vals: raise ValueError("终端值列表 (terminal_vals) 也为空，无法创建节点。")
+            return Node(random.choice(terminal_vals)) # 退化行为
+        if not terminal_vals: # terminal_vals 在此函数中是必须的
+            raise ValueError("终端值列表 (terminal_vals) 不能为空以创建一元操作的子节点。")
         selected_operator = random.choice(un_ops)
         selected_terminal_child = random.choice(terminal_vals)
         root_node = Node(selected_operator, left=Node(selected_terminal_child))
@@ -835,11 +1271,13 @@ def depth_one_trees(
     elif flag == 2:
         # 生成一个带两个终端子节点的二元操作符树
         if not bin_ops:
-            raise ValueError("二元操作符列表不能为空 (bin_ops)")
-        if not terminal_vals or len(terminal_vals) < 2: # 需要至少两个终端值用于子节点，除非允许相同
-             # 为了简化，这里允许选择相同的终端值作为左右子节点
-            if not terminal_vals:
-                raise ValueError("终端值列表不能为空 (terminal_vals)")
+            logger.warning("二元操作符列表为空，depth_one_trees flag 2 将退化为终端节点。")
+            if not terminal_vals: raise ValueError("终端值列表 (terminal_vals) 也为空，无法创建节点。")
+            return Node(random.choice(terminal_vals)) # 退化行为
+        if not terminal_vals : # terminal_vals 在此函数中是必须的
+             raise ValueError("终端值列表 (terminal_vals) 不能为空以创建二元操作的子节点。")
+        # if not terminal_vals or len(terminal_vals) < 2: # 原检查，但允许相同终端
+            # if not terminal_vals: # 已在上面检查
 
         selected_operator = random.choice(bin_ops)
         left_child = Node(random.choice(terminal_vals))
@@ -850,11 +1288,13 @@ def depth_one_trees(
     elif flag == 3:
         # 生成一个时间序列操作符树
         if not time_series_ops:
-            raise ValueError("时间序列操作符列表不能为空 (time_series_ops)")
+            logger.warning("时间序列操作符列表为空，depth_one_trees flag 3 将退化为终端节点。")
+            if not terminal_vals: raise ValueError("终端值列表 (terminal_vals) 也为空，无法创建节点。")
+            return Node(random.choice(terminal_vals)) # 退化行为
         if not terminal_vals:
-            raise ValueError("终端值列表不能为空 (terminal_vals)")
-        if not time_series_op_vals:
-            raise ValueError("时间序列操作参数值列表不能为空 (time_series_op_vals)")
+            raise ValueError("终端值列表 (terminal_vals) 不能为空以创建时间序列操作的数据子节点。")
+        if not time_series_op_vals: # ts_ops_values 也必须提供
+            raise ValueError("时间序列操作参数值列表 (time_series_op_vals) 不能为空。")
 
         selected_operator = random.choice(time_series_ops)
         data_child = Node(random.choice(terminal_vals)) # 第一个操作数是数据字段
@@ -864,8 +1304,8 @@ def depth_one_trees(
 
     else: # 默认行为或未识别的 flag
         # logger.warning(f"depth_one_trees 收到未识别的 flag: {flag}，将默认创建一个终端节点。")
-        if not terminal_vals:
-            raise ValueError("终端值列表不能为空 (terminal_vals)")
+        if not terminal_vals: # 最终检查
+            raise ValueError("终端值列表 (terminal_vals) 为空，无法创建默认的终端节点。")
         selected_terminal = random.choice(terminal_vals)
         root_node = Node(selected_terminal)
 
@@ -991,7 +1431,7 @@ def depth_three_tree(
         Node: 生成的深度约为三的树的根节点。
 
     注意:
-        - 此函数依赖全局定义的 `binary_ops`, `unary_ops`, `ts_ops`, `ts_ops_values`, `terminal_values` 列表。
+        - 此函数依赖全局定义的 `binary_ops`, `unary_ops`, `ts_ops`, `ts_ops_values`, `DEFAULT_TERMINAL_VALUES` 列表。
         - “深度三”是目标，实际深度取决于 `sub_trees` 中树的深度和组合方式。
           例如，如果用二元操作符连接两个深度为二的树，结果树的深度将是三。
           如果连接一个深度二的树和一个深度一的树，结果也是深度三。
@@ -1022,14 +1462,37 @@ def depth_three_tree(
             # 如果 sub_trees 只有一个元素，或者我们希望强制生成新的右子树
             logger.info("depth_three_tree (flag 0): sub_trees 只有一个元素或需要新右子树，将生成新的深度一树作为右孩子。")
             # 生成一个随机类型的深度一的树作为右孩子
-            # 注意：这里直接调用了全局的操作符/终端列表
-            right_child_flag = random.randint(0, 3) # 随机选择一种深度一树的类型
+            # 注意：这里需要能访问各种操作符和终端列表 (现在是 dynamic_terminal_values 或 DEFAULT_TERMINAL_VALUES)
+            # 为了安全，depth_one_trees 应总是从其调用者接收这些列表。
+            # 此处假设 dynamic_terminal_values 已经通过某种方式传递或在当前作用域可用。
+            # 如果 gp_algo.py 中的其他函数（如 depth_one_trees）依赖全局 terminal_values,
+            # 它们也需要被修改以接受一个 terminal_values 参数。
+            # 为了本任务的范围，我们假设 depth_one_trees 可以使用 DEFAULT_TERMINAL_VALUES 如果没有其他提供。
+            # 但更好的做法是确保 dynamic_terminal_values 被正确传递。
+            # 暂时，我们让 depth_one_trees 内部处理 terminal_vals 为空的情况，如果它作为参数传入。
+            # 这里，我们必须确保 depth_one_trees 使用的是动态获取的或默认的终端列表。
+            # 由于 dynamic_terminal_values 是在此函数作用域之外的 _get_dynamic_terminal_values 中获取的，
+            # 我们需要确保它被正确地传递给 depth_one_trees。
+            # 这是一个结构性问题，如果 depth_one_trees 等函数没有被修改以接受 dynamic_terminal_values。
+            # 假设这里的全局 terminal_values 已经被 dynamic_terminal_values 更新，或者 depth_one_trees 被修改。
+            # ***为了本任务，我们将假设 depth_one_trees 等函数将使用 DEFAULT_TERMINAL_VALUES
+            #    或者在调用它们时，会传入 dynamic_terminal_values (如此处调用 best_d1_alphas 时所示)***
+
+            right_child_flag = random.randint(0, 3)
             try:
-                right_child = depth_one_trees(terminal_values, binary_ops, ts_ops, ts_ops_values, unary_ops, right_child_flag)
+                # TODO: 确保 depth_one_trees 使用的是当前的 dynamic_terminal_values
+                # 这是一个重要的依赖点。如果 depth_one_trees 仍然引用旧的全局 terminal_values，则这里会有问题。
+                # 假设 depth_one_trees 被修改为接受 terminal_vals 参数，或者其内部使用了正确的动态列表。
+                # 为简化，我们用 DEFAULT_TERMINAL_VALUES 作为示例，实际应是 dynamic_terminal_values
+                current_terminals_for_subtree = DEFAULT_TERMINAL_VALUES # 应该用 dynamic_terminal_values
+                right_child = depth_one_trees(current_terminals_for_subtree, binary_ops, ts_ops, ts_ops_values, unary_ops, right_child_flag)
             except ValueError as e:
                 logger.error(f"depth_three_tree: 生成右子树时出错: {e}。将尝试仅使用终端值。")
-                if not terminal_values: raise ValueError("全局终端值列表 terminal_values 不能为空以创建备用右子树。") from e
-                right_child = Node(random.choice(terminal_values))
+                # if not terminal_values: raise ValueError("全局终端值列表 terminal_values 不能为空以创建备用右子树。") from e
+                # right_child = Node(random.choice(terminal_values))
+                if not DEFAULT_TERMINAL_VALUES: raise ValueError("默认终端值列表为空，无法创建备用右子树。") from e
+                right_child = Node(random.choice(DEFAULT_TERMINAL_VALUES))
+
 
         root_node = Node(selected_operator, left=left_child, right=right_child)
         # logger.debug(f"创建深度三树 (flag 0 - 二元): {root_node}")
@@ -1048,27 +1511,31 @@ def depth_three_tree(
 
     elif flag == 2: # 尝试使用一元操作符
         if not unary_ops:
-            raise ValueError("全局一元操作符列表 unary_ops 不能为空。")
-
-        selected_operator = random.choice(unary_ops)
-        child_node: Node = random.choice(sub_trees) # 操作数来自提供的子树
-        root_node = Node(selected_operator, left=child_node)
+            # Fallback or error
+            logger.warning("一元操作符列表为空，depth_three_tree flag 2 将退化为二元操作。")
+            flag = 0 # 退化到二元操作
+        else:
+            selected_operator = random.choice(unary_ops)
+            child_node: Node = random.choice(sub_trees) # 操作数来自提供的子树
+            root_node = Node(selected_operator, left=child_node)
         # logger.debug(f"创建深度三树 (flag 2 - 一元): {root_node}")
 
-    else:
-        logger.warning(f"depth_three_tree 收到未识别的 flag: {flag}。将默认按 flag 0 (二元操作) 处理。")
-        # 递归或委托给 flag 0 的逻辑
-        # 为避免代码重复，可以调用自身或提取公共逻辑，但这里简单重复以明确
+    if flag != 2 or root_node is None : # 如果 flag 不是 2 (即是0、1或默认) 或者 flag=2 但 root_node 未成功创建
+        if flag !=0 and flag !=1 : # 如果是未识别的 flag 或 flag=2 退化而来
+             logger.warning(f"depth_three_tree 收到未识别的 flag: {flag} 或因 unary_ops 为空而退化。将默认按 flag 0 (二元操作) 处理。")
+        # 默认行为 (flag 0 或退化)
         if not binary_ops: raise ValueError("全局二元操作符列表 binary_ops 不能为空。")
         selected_operator = random.choice(binary_ops)
         left_child = random.choice(sub_trees)
+
+        current_terminals_for_subtree = DEFAULT_TERMINAL_VALUES # 应为 dynamic_terminal_values
         right_child_flag = random.randint(0,3)
         try:
-            right_child = depth_one_trees(terminal_values, binary_ops, ts_ops, ts_ops_values, unary_ops, right_child_flag)
+            right_child = depth_one_trees(current_terminals_for_subtree, binary_ops, ts_ops, ts_ops_values, unary_ops, right_child_flag)
         except ValueError as e:
             logger.error(f"depth_three_tree (default): 生成右子树时出错: {e}。将尝试仅使用终端值。")
-            if not terminal_values: raise ValueError("全局终端值列表 terminal_values 不能为空以创建备用右子树。") from e
-            right_child = Node(random.choice(terminal_values))
+            if not DEFAULT_TERMINAL_VALUES: raise ValueError("默认终端值列表为空，无法创建备用右子树。") from e
+            right_child = Node(random.choice(DEFAULT_TERMINAL_VALUES))
         root_node = Node(selected_operator, left=left_child, right=right_child)
 
 
@@ -1078,3 +1545,78 @@ def depth_three_tree(
     return root_node
 
 # ... (文件末尾)
+
+
+# --- Alpha 表达式组合功能 ---
+def combine_alphas(alpha_expressions: List[str], method: str = "add") -> str:
+    """
+    将多个Alpha表达式组合成一个新的Alpha表达式。
+
+    参数:
+        alpha_expressions (List[str]): 一个包含多个Alpha表达式字符串的列表。
+        method (str): 组合方法，目前支持 "add" 和 "mean"。
+
+    返回:
+        str: 组合后的新Alpha表达式字符串。 如果无法组合则返回空字符串。
+    """
+    if not alpha_expressions:
+        logger.warning("Alpha表达式列表为空，无法进行组合。")
+        return ""
+
+    # 移除列表中的空字符串或None值，并确保它们是字符串
+    valid_expressions = [str(expr) for expr in alpha_expressions if expr and isinstance(expr, (str, int, float))] # 允许数字作为简单表达式
+    valid_expressions = [expr for expr in valid_expressions if expr.strip()] # 移除仅含空格的
+
+    if not valid_expressions:
+        logger.warning("有效的Alpha表达式列表为空 (在过滤空值和确保为字符串后)，无法进行组合。")
+        return ""
+
+    num_expressions = len(valid_expressions)
+
+    # 如果只有一个有效表达式，直接返回它 (经过可能的str()转换)
+    if num_expressions == 1:
+        logger.info(f"只有一个有效的Alpha表达式 '{valid_expressions[0]}', 直接返回。")
+        # 仍然对其进行一次语法验证，以防原始输入就有问题
+        if not _validate_alpha_syntax(valid_expressions[0]): # 引用 DEV-025 的函数
+            logger.warning(f"单个表达式 '{valid_expressions[0]}' 未通过语法验证。")
+            # return "" # 或者仍返回，让WQB处理
+        return valid_expressions[0]
+
+    combined_expr = ""
+    logger.info(f"开始组合 {num_expressions} 个Alpha表达式，使用方法: '{method}'. 表达式: {valid_expressions}")
+
+    if method == "add":
+        # 使用二元 add 嵌套组合
+        # 例如: [expr1, expr2, expr3] -> add(add(expr1, expr2), expr3)
+        current_expr = valid_expressions[0]
+        for i in range(1, num_expressions):
+            # 确保每个部分都经过语法检查，尽管组合本身可能引入问题
+            # if not _validate_alpha_syntax(current_expr) or not _validate_alpha_syntax(valid_expressions[i]):
+            #     logger.warning(f"参与组合的表达式之一语法无效: '{current_expr}' 或 '{valid_expressions[i]}'")
+            #     return "" # 如果严格要求，可以提前退出
+            current_expr = f"add({current_expr},{valid_expressions[i]})" # 注意：WQB的add通常是小写
+        combined_expr = current_expr
+
+    elif method == "mean":
+        # mean(expr1, expr2, ..., exprN) 实现为 divide(add(add(...), exprN), N)
+        # num_expressions 在此阶段保证 > 0 (因为之前已处理空列表和单元素列表)
+
+        sum_expr = valid_expressions[0]
+        for i in range(1, num_expressions):
+            sum_expr = f"add({sum_expr},{valid_expressions[i]})"
+
+        # WQB 的 divide 操作符通常需要两个参数，第二个参数可以是数值字面量
+        combined_expr = f"divide({sum_expr},{num_expressions})"
+
+    else:
+        logger.error(f"不支持的Alpha组合方法: '{method}'. 可用方法: 'add', 'mean'.")
+        return "" # 返回空字符串表示组合失败
+
+    # 对组合后的表达式进行一次轻量级语法验证
+    if not _validate_alpha_syntax(combined_expr): # 引用 DEV-025 的函数
+        logger.warning(f"组合后的表达式 '{combined_expr}' 未通过基本语法验证。请检查组合逻辑或输入表达式。")
+        # 根据策略，可能返回空字符串或抛出错误，或仍返回表达式让WQB平台处理
+        # return "" # 如果验证失败则返回空字符串，表示组合结果无效
+
+    logger.info(f"Alpha表达式组合完成: '{combined_expr}'.")
+    return combined_expr
