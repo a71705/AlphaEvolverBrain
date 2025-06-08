@@ -19,3 +19,11 @@ rq
 python-dotenv
 
 yagmail
+
+# 测试依赖 (DEV-051)
+pytest
+pytest-cov # 用于覆盖率报告
+httpx # FastAPI TestClient 依赖，也用于异步HTTP请求测试
+pytest-asyncio # 如果有需要直接测试的异步函数 (非FastAPI端点，端点由TestClient处理)
+pytest-mock # 用于mocking
+# starlette TestClient 可能间接依赖，FastAPI已包含
