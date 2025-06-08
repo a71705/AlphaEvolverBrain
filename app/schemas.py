@@ -73,12 +73,21 @@ class ExperimentBase(BaseModel):
     """实验的基础模型"""
     name: str = Field(..., min_length=3, max_length=100, description="实验的名称")
     description: Optional[str] = Field(None, description="实验的详细描述")
-    ga_config_json: Dict[str, Any] = Field(..., description="遗传算法配置 (JSON格式)")
-    simulation_config_json: Dict[str, Any] = Field(..., description="模拟回测配置 (JSON格式)")
+    ga_config_json: Dict[str, Any] = Field(..., description="遗传算法配置 (JSON格式)。预期包含键如 'population_size', 'generations', 'use_dynamic_field_weights', 'perform_oos_simulation', 'oos_simulation_parameters' 等。")
+    simulation_config_json: Dict[str, Any] = Field(..., description="模拟回测配置 (JSON格式)。预期包含 'settings' 等键，用于IS回测。")
 
 class ExperimentCreate(ExperimentBase):
-    """用于创建新实验的模型"""
-    pass # 目前与 Base 相同，但可以扩展
+    """
+    用于创建新实验的模型。
+    ga_config_json 应该包含GA运行所需的所有参数，包括是否执行OOS以及OOS的参数。
+    例如:
+    {
+        "perform_oos_simulation": True,
+        "oos_simulation_parameters": { "oosStartDate": "YYYY-MM-DD", "oosEndDate": "YYYY-MM-DD", ... },
+        ... (其他GA参数)
+    }
+    """
+    pass # 继承自ExperimentBase，它包含了ga_config_json和simulation_config_json
 
 class ExperimentUpdate(BaseModel):
     """用于更新实验的模型 (部分更新)"""
