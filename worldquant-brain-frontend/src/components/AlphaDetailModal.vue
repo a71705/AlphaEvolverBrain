@@ -59,6 +59,14 @@
           <pre class="stats-box" v-if="alphaDetail.simulation_settings_json">{{ JSON.stringify(alphaDetail.simulation_settings_json, null, 2) }}</pre>
           <el-empty v-else description="无模拟配置信息"></el-empty>
         </el-tab-pane>
+        <!-- DEV-048: 新增表达式结构标签页 -->
+        <el-tab-pane label="表达式结构" name="tree_structure">
+          <AlphaStructureViewer
+            v-if="alphaDetail && alphaDetail.tree_structure_json"
+            :tree-data="alphaDetail.tree_structure_json"
+          />
+          <el-empty v-else description="无表达式结构数据或后端未提供"></el-empty>
+        </el-tab-pane>
       </el-tabs>
 
       <el-alert v-if="alphaDetail.simulation_error_message" :title="`模拟错误信息`" type="error" show-icon style="margin-top: 20px;">
@@ -81,10 +89,11 @@
 import { ref, watch, nextTick } from 'vue';
 import axios from 'axios';
 import { ElMessage, ElDialog, ElDescriptions, ElDescriptionsItem, ElTabs, ElTabPane, ElEmpty, ElAlert, ElButton, ElTag } from 'element-plus';
+import AlphaStructureViewer from './AlphaStructureViewer.vue'; // DEV-048: 导入新组件
 
 export default {
   name: 'AlphaDetailModal',
-  components: { ElDialog, ElDescriptions, ElDescriptionsItem, ElTabs, ElTabPane, ElEmpty, ElAlert, ElButton, ElTag },
+  components: { AlphaStructureViewer, ElDialog, ElDescriptions, ElDescriptionsItem, ElTabs, ElTabPane, ElEmpty, ElAlert, ElButton, ElTag }, // DEV-048: 注册组件
   props: {
     alphaId: {
       type: String, // Expecting UUID as string
@@ -161,9 +170,9 @@ export default {
       } else if (!newVal) {
         // Reset state when modal closes
         alphaDetail.value = null;
-        activeTab.value = 'is_stats';
+        activeTab.value = 'is_stats'; // DEV-048: 修正 activeTab 引用
         error.value = '';
-        loading.value = false; // Ensure loading is reset
+        loading.value = false;
       }
     });
 

@@ -25,9 +25,13 @@
         <span>数据源</span>
       </el-menu-item>
       <el-menu-item index="/status" disabled> <!-- 暂时禁用 -->
-        <el-icon><Monitor /></el-icon>
-        <span>系统状态</span>
+                <el-icon><DataLine /></el-icon> <!-- DEV-049: 更新图标 -->
+                <span>API用量监控</span> <!-- DEV-049: 更新文本 -->
       </el-menu-item>
+              <el-menu-item index="/compare-alphas">
+                <el-icon><Histogram /></el-icon>
+                <span>Alpha比较</span>
+              </el-menu-item>
       <!-- 更多菜单项 -->
     </el-menu>
   </el-aside>
@@ -38,17 +42,21 @@ import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router'; // 确保从 vue-router 导入
 import {
   DataAnalysis, // 实验列表图标
-  Coin,         // 数据源图标
-  Monitor,      // 系统状态图标
-  // Menu as IconMenu, // 如果需要折叠按钮的菜单图标
-} from '@element-plus/icons-vue'; // 导入 Element Plus 图标
+          Coin,
+          Monitor,
+          Histogram,
+          DataLine,     // DEV-049: 新增图标导入
+          // Menu as IconMenu,
+        } from '@element-plus/icons-vue';
 
 export default {
   name: 'SideBar',
   components: {
     DataAnalysis,
     Coin,
-    Monitor,
+            Monitor,    // Monitor 现在可能不再直接使用，或者用于其他系统状态页面
+            Histogram,
+            DataLine,   // DEV-049
     // IconMenu
   },
   setup() {
@@ -74,12 +82,14 @@ export default {
         activeIndex.value = '/experiments';
       } else if (newPath.startsWith('/data-sources')) {
         activeIndex.value = '/data-sources';
-      } else if (newPath.startsWith('/status')) {
-        activeIndex.value = '/status';
+              } else if (newPath.startsWith('/status/api-usage')) { // DEV-049: 更新路径匹配
+                activeIndex.value = '/status/api-usage';
+              } else if (newPath.startsWith('/compare-alphas')) {
+                activeIndex.value = '/compare-alphas';
       } else {
         activeIndex.value = newPath;
       }
-    }, { immediate: true }); // 立即执行一次以设置初始状态
+            }, { immediate: true });
 
     // 如果未登录且尝试访问非公开页面，导航守卫会处理重定向
     // 这里确保未登录时侧边栏不渲染

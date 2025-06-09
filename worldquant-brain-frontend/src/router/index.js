@@ -27,15 +27,26 @@ const routes = [
   {
     path: '/experiments',
     name: 'experiments',
-    // 在 DEV-022 中我们使用了动态导入，这里保持一致
     component: () => import(/* webpackChunkName: "experiments" */ '../views/ExperimentListView.vue'),
-    meta: { requiresAuth: true } // 确保此路由需要认证
+    meta: { requiresAuth: true }
   },
-  { // 新增实验详情页路由
-    path: '/experiments/:experimentId', // 使用动态路由参数
+  {
+    path: '/experiments/:experimentId',
     name: 'experiment-detail',
-    component: ExperimentDetailView, // 指向新创建的视图组件
-    meta: { requiresAuth: true } // 需要认证才能访问
+    component: ExperimentDetailView,
+    meta: { requiresAuth: true }
+  },
+  { // DEV-047: 新增 Alpha 比较视图路由
+    path: '/compare-alphas',
+    name: 'alpha-comparison',
+    component: () => import(/* webpackChunkName: "alpha-comparison" */ '../views/AlphaComparisonView.vue'),
+    meta: { requiresAuth: true }
+  },
+  { // DEV-049: 新增API状态仪表盘路由
+    path: '/status/api-usage',
+    name: 'api-status-dashboard',
+    component: () => import(/* webpackChunkName: "api-status-dashboard" */ '../views/ApiStatusDashboardView.vue'),
+    meta: { requiresAuth: true } // 通常状态页面也需要认证
   }
   // ... 其他路由
 ];
