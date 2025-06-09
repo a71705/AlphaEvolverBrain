@@ -17,11 +17,17 @@ from .auth import router as auth_router # 使用 as auth_router 避免命名冲�
 # 因此, /login 的完整路径将是 /api/v1/auth/login。
 api_router.include_router(auth_router)
 
+# --- 包含实验管理相关的路由 (新增 DEV-017) ---
+from .experiments import router as experiments_router # 导入实验模块的路由器
+# 将实验路由器包含到 v1 主路由器中
+# experiments_router 中定义的端点 (例如 GET /, POST /, GET /{experiment_id})
+# 将自动获得 /api/v1 的前缀 (来自 app/main.py 中对 api_router 的包含)
+# 和 /experiments 的前缀 (来自 experiments.py 中 APIRouter 的定义)。
+# 例如, 创建实验的完整路径将是 /api/v1/experiments/。
+api_router.include_router(experiments_router)
+
 
 # --- 后续其他 v1 API 模块的路由器将在此处包含 ---
 # 例如:
-# from .experiments import router as experiments_router
-# api_router.include_router(experiments_router)
-#
 # from .alphas import router as alphas_router
 # api_router.include_router(alphas_router)

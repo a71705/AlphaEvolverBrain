@@ -40,6 +40,12 @@ class Experiment(Base):
     # 随机种子, 用于复现实验, 可为空
     random_seed = Column(Integer, nullable=True, comment="用于初始化随机数生成器的种子，以确保实验可复现")
 
+    # 新增字段：关联的 RQ (Redis Queue) 任务 ID
+    # 用于追踪在 RQ 中执行此实验的后台任务的状态和进度。
+    # 此字段通常在任务成功提交到队列后被填充。
+    # 设置 index=True 是因为我们可能会根据 rq_job_id 查询实验 (虽然不常见，但可能用于调试或特定场景)。
+    rq_job_id = Column(String, nullable=True, index=True, comment="关联的RQ任务ID")
+
     # 定义与 Alpha 模型的一对多关系
     # 'alphas' 属性将允许从 Experiment 对象访问其关联的所有 Alpha 对象
     # back_populates='experiment' 指向 Alpha 模型中名为 'experiment' 的反向关系属性
